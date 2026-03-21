@@ -45,6 +45,9 @@ pnpm-debug.log*
 *.sqlite
 *.db
 
+# Superpowers docs (local only)
+docs/superpowers/
+
 # Vercel
 .vercel
 
