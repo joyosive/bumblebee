@@ -33,6 +33,11 @@ pnpm-debug.log*
 # Local env files
 .env
 .env*.local
+.env.local
+
+# SQLite
+*.sqlite
+*.db
 
 # Vercel
 .vercel
