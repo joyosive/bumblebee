@@ -1,15 +1,8 @@
 import WebSocket from 'ws';
+import type { AgentEvent } from '../data/types.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
-
-export interface AgentEvent {
-  agent: 'scout' | 'analyst' | 'funder';
-  type: 'spawn' | 'work' | 'complete' | 'error';
-  message: string;
-  data?: Record<string, unknown>;
-  timestamp?: number;
-}
 
 function connect() {
   const url = process.env.DASHBOARD_WS_URL || 'ws://localhost:3001';
