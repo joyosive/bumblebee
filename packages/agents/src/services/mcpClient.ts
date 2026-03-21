@@ -1,42 +1,24 @@
-/**
- * MCP Client — connects to mcp-xrpl server for XRPL operations
- *
- * Instead of calling xrpl.js directly, the agent uses MCP tools:
- * - get-account-info: read account balances and properties
- * - escrow-create: create conditional escrow
- * - escrow-finish: release escrowed funds
- * - credential-create: issue verification credentials
- * - oracle-set: publish trust score data
- * - did-create: create on-chain identity
- *
- * This demonstrates the MCP standard for agent → blockchain tool access.
- */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { emitEvent } from '../bridge/websocket.js';
-
-let mcpClient: Client | null = null;
-let mcpConnected = false;
-
+import type { BeeName } from '../data/types.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Read at call time, not import time — dotenv hasn't loaded yet when this module is first imported
+const mcpClients = new Map<BeeName, Client>();
+
 function getMCPServerPath(): string {
   return process.env.MCP_SERVER_PATH || path.resolve(__dirname, '../../../../mcp-xrpl');
 }
 
-export async function connectMCP(): Promise<boolean> {
+export async function connectMCPForBee(bee: BeeName, walletSeed: string): Promise<boolean> {
   try {
     const serverPath = path.resolve(getMCPServerPath());
     const tsxBin = path.join(serverPath, 'node_modules', '.bin', 'tsx');
 
-    console.log(`   MCP server path: ${serverPath}`);
-    console.log(`   tsx binary: ${tsxBin}`);
-
-    mcpClient = new Client({ name: 'bumblebee-agent', version: '1.0.0' });
+    const client = new Client({ name: `bumblebee-${bee}`, version: '2.0.0' });
 
     const transport = new StdioClientTransport({
       command: tsxBin,
@@ -45,128 +27,94 @@ export async function connectMCP(): Promise<boolean> {
       env: {
         ...process.env,
         PATH: `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}`,
-        XRPL_SEED: process.env.SCOUT_WALLET_SEED || '',
+        XRPL_SEED: walletSeed,
         XRPL_NETWORK: 'testnet',
       },
     });
 
-    await mcpClient.connect(transport);
-    mcpConnected = true;
-    console.log('🔌 MCP: Connected to mcp-xrpl server');
-
-    // List available tools
-    const tools = await mcpClient.listTools();
-    console.log(`🔌 MCP: ${tools.tools.length} XRPL tools available`);
-    const toolNames = tools.tools.map(t => t.name).slice(0, 15);
-    console.log(`   Tools: ${toolNames.join(', ')}...`);
-
-    emitEvent({ agent: 'analyst', type: 'work', message: `MCP connected: ${tools.tools.length} XRPL tools available` });
-
+    await client.connect(transport);
+    mcpClients.set(bee, client);
+    console.log(`   MCP: ${bee} connected`);
     return true;
   } catch (err: any) {
-    console.log('⚠️  MCP: Failed to connect:', err.message?.slice(0, 60));
-    mcpConnected = false;
+    console.log(`   MCP: ${bee} failed: ${err.message?.slice(0, 60)}`);
     return false;
   }
 }
 
-export function isMCPConnected(): boolean {
-  return mcpConnected && mcpClient !== null;
+export async function initAllMCP(): Promise<boolean> {
+  const bees: { name: BeeName; seedEnv: string }[] = [
+    { name: 'evaluator', seedEnv: 'EVALUATOR_WALLET_SEED' },
+    { name: 'treasury', seedEnv: 'TREASURY_WALLET_SEED' },
+    { name: 'facilitator', seedEnv: 'FACILITATOR_WALLET_SEED' },
+    { name: 'verifier', seedEnv: 'VERIFIER_WALLET_SEED' },
+    { name: 'reviewer', seedEnv: 'REVIEWER_WALLET_SEED' },
+  ];
+
+  let anyConnected = false;
+  for (const { name, seedEnv } of bees) {
+    const seed = process.env[seedEnv];
+    if (seed) {
+      const ok = await connectMCPForBee(name, seed);
+      if (ok) anyConnected = true;
+    } else {
+      console.log(`   MCP: ${name} skipped (no ${seedEnv})`);
+    }
+  }
+  return anyConnected;
 }
 
-export async function mcpCall(toolName: string, args: Record<string, unknown>): Promise<any> {
-  if (!mcpClient || !mcpConnected) {
-    throw new Error('MCP not connected');
-  }
+export function isMCPConnected(bee: BeeName): boolean {
+  return mcpClients.has(bee);
+}
 
-  console.log(`[MCP] Calling: ${toolName}(${JSON.stringify(args).slice(0, 100)})`);
+export async function mcpCall(bee: BeeName, toolName: string, args: Record<string, unknown>): Promise<any> {
+  const client = mcpClients.get(bee);
+  if (!client) throw new Error(`MCP not connected for ${bee}`);
 
-  const result = await mcpClient.callTool({ name: toolName, arguments: args });
+  console.log(`[MCP:${bee}] ${toolName}(${JSON.stringify(args).slice(0, 100)})`);
+  const result = await client.callTool({ name: toolName, arguments: args });
 
-  // Extract text content from MCP response
   const textContent = (result.content as any[])?.find((c: any) => c.type === 'text');
   if (textContent) {
-    try {
-      return JSON.parse(textContent.text);
-    } catch {
-      return textContent.text;
-    }
+    try { return JSON.parse(textContent.text); } catch { return textContent.text; }
   }
   return result;
 }
 
-// ── Convenience wrappers for common XRPL operations ──────────────────
+// ── Convenience wrappers ───────────────────────────────────
 
-export async function mcpGetAccountInfo(address: string): Promise<any> {
-  return mcpCall('get-account-info', { address, useTestnet: true });
+export async function mcpCreateDID(bee: BeeName, uri: string) {
+  return mcpCall(bee, 'did-create', { uri, useTestnet: true });
 }
 
-export async function mcpCreateEscrow(
-  amount: string,
-  destination: string,
-  condition: string,
-  cancelAfter: number
-): Promise<any> {
-  return mcpCall('escrow-create', {
-    amount,
-    destination,
-    condition,
-    cancelAfter,
-    useTestnet: true,
-  });
+export async function mcpCreateEscrow(amount: string, destination: string, condition: string, cancelAfter: number) {
+  return mcpCall('treasury', 'escrow-create', { amount, destination, condition, cancelAfter, useTestnet: true });
 }
 
-export async function mcpFinishEscrow(
-  owner: string,
-  offerSequence: number,
-  condition: string,
-  fulfillment: string
-): Promise<any> {
-  return mcpCall('escrow-finish', {
-    owner,
-    offerSequence,
-    condition,
-    fulfillment,
-    useTestnet: true,
-  });
+export async function mcpFinishEscrow(owner: string, offerSequence: number, condition: string, fulfillment: string) {
+  return mcpCall('treasury', 'escrow-finish', { owner, offerSequence, condition, fulfillment, useTestnet: true });
 }
 
-export async function mcpCreateCredential(
-  subject: string,
-  credentialType: string,
-  uri?: string
-): Promise<any> {
-  return mcpCall('credential-create', {
-    subject,
-    credentialType,
-    uri,
-    useTestnet: true,
-  });
+export async function mcpCancelEscrow(owner: string, offerSequence: number) {
+  return mcpCall('treasury', 'escrow-cancel', { owner, offerSequence, useTestnet: true });
 }
 
-export async function mcpSetOracle(
-  oracleDocumentId: number,
-  provider: string,
-  assetClass: string,
-  lastUpdateTime: number,
-  priceData: any[]
-): Promise<any> {
-  return mcpCall('oracle-set', {
-    oracleDocumentId,
-    provider,
-    assetClass,
-    lastUpdateTime,
-    priceData,
-    useTestnet: true,
-  });
+export async function mcpSetOracle(oracleDocumentId: number, provider: string, assetClass: string, lastUpdateTime: number, priceData: any[]) {
+  return mcpCall('reviewer', 'oracle-set', { oracleDocumentId, provider, assetClass, lastUpdateTime, priceData, useTestnet: true });
 }
 
-export async function mcpCreateDID(uri: string): Promise<any> {
-  return mcpCall('did-create', { uri, useTestnet: true });
+export async function mcpCreateCredential(bee: BeeName, subject: string, credentialType: string, uri?: string) {
+  return mcpCall(bee, 'credential-create', { subject, credentialType, uri, useTestnet: true });
 }
 
-export async function mcpListTools(): Promise<string[]> {
-  if (!mcpClient) return [];
-  const tools = await mcpClient.listTools();
+export async function mcpGetAccountInfo(bee: BeeName, address: string) {
+  return mcpCall(bee, 'get-account-info', { address, useTestnet: true });
+}
+
+export async function mcpListTools(bee: BeeName): Promise<string[]> {
+  const client = mcpClients.get(bee);
+  if (!client) return [];
+  const tools = await client.listTools();
   return tools.tools.map(t => t.name);
 }
