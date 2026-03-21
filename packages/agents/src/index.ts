@@ -23,24 +23,50 @@ import { completeCampaign } from './bees/reviewer.js';
 import { getCampaignsByNgo, getCampaignsByStatus, getMilestones, updateMilestone } from './db/database.js';
 import type { Campaign, Milestone, BeeName } from './data/types.js';
 
-// ── Gemini ───────────────────────────────────────────────────────────
+// ── Gemini (key rotation) ────────────────────────────────────────────
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-const gemini = genAI.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
+const GEMINI_KEYS = (process.env.GOOGLE_API_KEYS || process.env.GOOGLE_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+let currentKeyIndex = 0;
+
+function getGeminiModel() {
+  const key = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
+  const ai = new GoogleGenerativeAI(key);
+  return ai.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
+}
+
+function rotateKey() {
+  if (GEMINI_KEYS.length > 1) {
+    currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
+    console.log(`[GEMINI] Rotated to key ${currentKeyIndex + 1}/${GEMINI_KEYS.length}`);
+  }
+}
 
 // Track conversation state per user
-const userState = new Map<string, { mode: string; campaignId?: string; context?: string }>();
+interface UserState {
+  mode: string;
+  campaignId?: string;
+  context?: string;
+  step?: number;
+  draft?: Record<string, any>;
+}
+const userState = new Map<string, UserState>();
 
-async function askGemini(systemPrompt: string, userMessage: string): Promise<string> {
-  try {
-    const result = await gemini.generateContent([
-      { role: 'user', parts: [{ text: `${systemPrompt}\n\nUser: ${userMessage}` }] },
-    ]);
-    return result.response.text();
-  } catch (err) {
-    console.error('[GEMINI]', err);
-    return 'Something went wrong. Try /help for commands.';
+// Campaign intake prompt — one message, Gemini or manual parse
+const CAMPAIGN_PROMPT = `Tell me about your campaign in one message. Include:\n- Organization name\n- Campaign title\n- What it does\n- Sector (Education, Healthcare, WASH, Agriculture, Energy, Environment)\n- Country\n- Amount needed in XRP`;
+
+async function askGemini(systemPrompt: string, userMessage: string): Promise<string | null> {
+  for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
+    try {
+      const model = getGeminiModel();
+      const result = await model.generateContent(`${systemPrompt}\n\nUser: ${userMessage}`);
+      return result.response.text();
+    } catch (err: any) {
+      console.log(`[GEMINI] Key ${currentKeyIndex + 1} failed:`, err.message?.slice(0, 60));
+      rotateKey();
+    }
   }
+  console.log('[GEMINI] All keys exhausted');
+  return null;
 }
 
 // ── Main ────────────────────────────────────────────────────────────
@@ -106,7 +132,7 @@ async function main() {
   bot.command('campaign', (ctx) => {
     const userId = ctx.from.id.toString();
     userState.set(userId, { mode: 'campaign_intake' });
-    ctx.reply('Tell me about your project. What does your organization do, where, and how much funding do you need?');
+    ctx.reply(CAMPAIGN_PROMPT);
   });
 
   bot.command('mystatus', (ctx) => {
@@ -219,82 +245,94 @@ async function main() {
     }
   });
 
-  // ── Text handler (natural chat + campaign intake) ──────
+  // ── Text handler ──────
 
   bot.on(message('text'), async (ctx) => {
     const userId = ctx.from.id.toString();
     const text = ctx.message.text;
     const state = userState.get(userId);
+    const lower = text.toLowerCase();
 
     console.log(`[MSG] ${userId}: "${text.slice(0, 80)}"`);
 
     try {
-      // Campaign intake mode
+      // Campaign intake — parse single message
       if (state?.mode === 'campaign_intake') {
-        const context = state.context || '';
-        const fullContext = context ? `${context}\nUser: ${text}` : text;
+        // Try Gemini extraction first
+        const geminiResponse = await askGemini(getFacilitatorSystemPrompt(), text);
+        let campaignData = geminiResponse ? parseCampaignFromGemini(geminiResponse) : null;
 
-        const response = await askGemini(getFacilitatorSystemPrompt(), fullContext);
+        // Fallback: simple extraction from message
+        if (!campaignData) {
+          const sectors = ['Education', 'Healthcare', 'WASH', 'Agriculture', 'Energy', 'Environment'];
+          const foundSector = sectors.find(s => lower.includes(s.toLowerCase())) || 'Education';
+          const amountMatch = text.match(/(\d+)\s*XRP/i);
+          const amount = amountMatch ? parseFloat(amountMatch[1]) : 3;
 
-        // Check if Gemini extracted campaign data
-        const campaignData = parseCampaignFromGemini(response);
-        if (campaignData) {
-          const result = handleCampaignCreate(campaignData, userId);
-          userState.delete(userId);
+          campaignData = {
+            ngo_name: text.split(',')[0]?.trim().slice(0, 60) || 'NGO',
+            title: text.split(',')[1]?.trim().slice(0, 60) || text.slice(0, 60),
+            description: text,
+            sector: foundSector,
+            country: 'Global',
+            funding_goal: Math.min(amount, 10),
+          };
+        }
 
-          // Auto-trigger EvaluatorBee
-          const evalResult = evaluateCampaign(result.campaignId);
-          ctx.reply(result.message);
+        const result = handleCampaignCreate(campaignData, userId);
+        userState.delete(userId);
 
-          if (evalResult.approved) {
-            ctx.reply(evalResult.message);
+        const evalResult = evaluateCampaign(result.campaignId);
+        ctx.reply(result.message);
 
-            // Auto-trigger TreasuryBee
-            const fundResult = await allocateAndCreateEscrows(result.campaignId);
-            ctx.reply(fundResult);
-          } else {
-            ctx.reply(evalResult.message);
-          }
+        if (evalResult.approved) {
+          ctx.reply(evalResult.message);
+          const fundResult = await allocateAndCreateEscrows(result.campaignId);
+          ctx.reply(fundResult);
         } else {
-          // Gemini is still asking questions — strip any CAMPAIGN_DATA artifacts
-          const cleanResponse = response.replace(/CAMPAIGN_DATA:\{.*\}/g, '').trim();
-          userState.set(userId, { mode: 'campaign_intake', context: fullContext + '\nAssistant: ' + cleanResponse });
-          ctx.reply(cleanResponse);
+          ctx.reply(evalResult.message);
         }
         return;
       }
 
-      // Natural chat — detect intent
-      const lower = text.toLowerCase();
-
-      if (lower.includes('campaign') || lower.includes('funding') || lower.includes('project') || lower.includes('program')) {
-        userState.set(userId, { mode: 'campaign_intake', context: text });
-        const response = await askGemini(getFacilitatorSystemPrompt(), text);
-        const campaignData = parseCampaignFromGemini(response);
-        if (campaignData) {
-          const result = handleCampaignCreate(campaignData, userId);
-          userState.delete(userId);
-          const evalResult = evaluateCampaign(result.campaignId);
-          ctx.reply(result.message);
-          if (evalResult.approved) {
-            ctx.reply(evalResult.message);
-            const fundResult = await allocateAndCreateEscrows(result.campaignId);
-            ctx.reply(fundResult);
+      // Intent: submit evidence / finished / done
+      if (lower.includes('finish') || lower.includes('done') || lower.includes('completed') || lower.includes('evidence') || lower.includes('submit')) {
+        const campaigns = getCampaignsByNgo(userId) as Campaign[];
+        const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+        if (activeCampaign) {
+          const milestones = getMilestones(activeCampaign.id) as Milestone[];
+          const activeMilestone = milestones.find(m => m.status === 'active');
+          if (activeMilestone) {
+            userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: activeMilestone.number.toString() });
+            ctx.reply(`Send evidence for milestone ${activeMilestone.number}: "${activeMilestone.title}"\n\nAttach a photo or document.`);
           } else {
-            ctx.reply(evalResult.message);
+            ctx.reply('All milestones are either completed or pending. Use /mystatus to check.');
           }
         } else {
-          const cleanResponse = response.replace(/CAMPAIGN_DATA:\{.*\}/g, '').trim();
-          userState.set(userId, { mode: 'campaign_intake', context: text + '\nAssistant: ' + cleanResponse });
-          ctx.reply(cleanResponse);
+          ctx.reply('No active campaign. Use /campaign to start one.');
         }
         return;
       }
 
-      // General companion chat
-      const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct and helpful. Short messages. If someone describes a project or asks about funding, suggest /campaign. If they want to check status, suggest /mystatus. If they ask about the treasury, suggest /pool.`;
+      // Intent: start a campaign
+      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding')) {
+        userState.set(userId, { mode: 'campaign_intake' });
+        ctx.reply(CAMPAIGN_PROMPT);
+        return;
+      }
+
+      // General chat — try Gemini, smart fallback if unavailable
+      const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct, short, no emojis. If someone describes a project, suggest /campaign. Status check: /mystatus. Treasury: /pool.`;
       const response = await askGemini(companionPrompt, text);
-      ctx.reply(response);
+      if (response) {
+        ctx.reply(response);
+      } else if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello') || lower.includes('sup') || lower.includes('yo')) {
+        ctx.reply('Hey. Ready when you are.\n\n/campaign — submit a funding request\n/mystatus — check progress\n/pool — treasury balance');
+      } else if (lower.includes('help') || lower.includes('what') || lower.includes('how')) {
+        ctx.reply('I manage impact funding on XRPL. NGOs submit campaigns, I evaluate them, set milestones, and release funds as you deliver.\n\nStart with /campaign');
+      } else {
+        ctx.reply('Not sure what you mean. Try /campaign to get started or /help for options.');
+      }
 
     } catch (err: any) {
       console.error('[BOT]', err.message);

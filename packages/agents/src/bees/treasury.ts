@@ -2,7 +2,8 @@
 import { createEscrow, finishEscrow, cancelEscrow } from '../services/escrow.js';
 import { generateConditionPair } from '../services/cryptoCondition.js';
 import { getWallet, getExplorerUrl, getAccountInfo } from '../services/xrplClient.js';
-import { createEscrowRecord, updateEscrowStatus, getEscrow, getActiveEscrows, createAllocation, updateCampaignStatus, getCampaign } from '../db/database.js';
+import { createEscrowRecord, updateEscrowStatus, getEscrow, getActiveEscrows, createAllocation, updateCampaignStatus, getCampaign, getMilestones, updateMilestone } from '../db/database.js';
+import type { Milestone } from '../data/types.js';
 import { emitEvent } from '../bridge/websocket.js';
 import type { Campaign, EscrowRecord } from '../data/types.js';
 
@@ -77,9 +78,34 @@ export async function allocateAndCreateEscrows(campaignId: string): Promise<stri
 
   updateCampaignStatus(campaignId, 'funded', { funded_at: new Date().toISOString() });
 
+  // Release M1 immediately — NGO needs seed money to start
+  const m1Escrow = getEscrow(campaignId, 1) as EscrowRecord | undefined;
+  let m1ReleaseMsg = '';
+  if (m1Escrow) {
+    try {
+      const releaseResult = await finishEscrow(
+        TREASURY_SEED(),
+        m1Escrow.owner_address,
+        m1Escrow.sequence,
+        m1Escrow.condition,
+        m1Escrow.fulfillment,
+      );
+      updateEscrowStatus(m1Escrow.id, 'released');
+      // Mark M1 completed, M2 active
+      const milestones = getMilestones(campaignId) as Milestone[];
+      const m1 = milestones.find(m => m.number === 1);
+      const m2 = milestones.find(m => m.number === 2);
+      if (m1) updateMilestone(m1.id, { status: 'completed', approved_at: new Date().toISOString() });
+      if (m2) updateMilestone(m2.id, { status: 'active' });
+      m1ReleaseMsg = `\nM1 released: ${(amounts[0] / 1_000_000).toFixed(2)} XRP sent to NGO | ${getExplorerUrl(releaseResult.txHash)}`;
+    } catch (err: any) {
+      m1ReleaseMsg = `\nM1 release failed: ${err.message}`;
+    }
+  }
+
   emitEvent({ agent: 'treasury', type: 'complete', message: `Funded: ${campaign.title}`, timestamp: Date.now() });
 
-  return `Funded. 3 milestone escrows created:\n\n${results.join('\n')}\n\nNGO can now start on milestone 1.`;
+  return `Funded. 3 milestone escrows created:\n\n${results.join('\n')}${m1ReleaseMsg}\n\nM1 funds released. Start working, submit evidence for M2 when ready with /submit 2`;
 }
 
 export async function releaseMilestoneEscrow(campaignId: string, milestoneNumber: number): Promise<string> {
