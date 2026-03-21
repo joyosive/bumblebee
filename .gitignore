@@ -23,6 +23,12 @@ build
 # Misc
 .DS_Store
 *.pem
+package-lock.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
 
 # Debug
 npm-debug.log*
