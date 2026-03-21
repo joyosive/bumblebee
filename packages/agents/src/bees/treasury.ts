@@ -105,7 +105,7 @@ export async function allocateAndCreateEscrows(campaignId: string): Promise<stri
 
   emitEvent({ agent: 'treasury', type: 'complete', message: `Funded: ${campaign.title}`, timestamp: Date.now() });
 
-  return `Funded. 3 milestone escrows created:\n\n${results.join('\n')}${m1ReleaseMsg}\n\nM1 funds released. Start working, submit evidence for M2 when ready with /submit 2`;
+  return `[TreasuryBee] Funded. 3 milestone escrows created:\n\n${results.join('\n')}${m1ReleaseMsg}\n\nM1 funds released. Start working, send "done" or /submit 2 when M2 is ready.`;
 }
 
 export async function releaseMilestoneEscrow(campaignId: string, milestoneNumber: number): Promise<string> {
@@ -132,7 +132,7 @@ export async function releaseMilestoneEscrow(campaignId: string, milestoneNumber
       timestamp: Date.now(),
     });
 
-    return `Milestone ${milestoneNumber} payment released. ${(parseInt(escrow.amount) / 1_000_000).toFixed(2)} XRP sent to NGO.\n${getExplorerUrl(result.txHash)}`;
+    return `[TreasuryBee] Milestone ${milestoneNumber} payment released. ${(parseInt(escrow.amount) / 1_000_000).toFixed(2)} XRP sent to NGO.\n${getExplorerUrl(result.txHash)}`;
   } catch (err: any) {
     return `Release failed: ${err.message}`;
   }
@@ -166,5 +166,5 @@ export async function getPoolStatus(): Promise<string> {
   const balanceXRP = parseInt(accountInfo.Balance) / 1_000_000;
   const available = balanceXRP - 10; // base reserve
 
-  return `Treasury Pool\nAddress: ${treasuryWallet.address}\nBalance: ${balanceXRP.toFixed(2)} XRP\nAvailable: ${available.toFixed(2)} XRP (after 10 XRP base reserve)`;
+  return `[TreasuryBee] Pool Status\nAddress: ${treasuryWallet.address}\nBalance: ${balanceXRP.toFixed(2)} XRP\nAvailable: ${available.toFixed(2)} XRP (after 10 XRP base reserve)`;
 }

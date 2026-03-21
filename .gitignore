@@ -51,6 +51,7 @@ pnpm-debug.log*
 
 # Superpowers docs (local only)
 docs/superpowers/
+.superpowers/
 
 # Vercel
 .vercel

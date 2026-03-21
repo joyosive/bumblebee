@@ -1,200 +1,239 @@
-# Scaffold-XRP
+<p align="center">
+  <span style="font-size: 48px">🐝</span>
+</p>
 
-A Next.js-based development stack for building decentralized applications on XRPL with smart contracts. Built with Turborepo, inspired by Scaffold-ETH-2.
+<h1 align="center">BumbleBee</h1>
 
-## Features
+<p align="center">
+  <strong>Autonomous Impact Funding on XRPL</strong>
+  <br />
+  <em>5 autonomous agents evaluate, fund, verify, and score NGO campaigns — all on-chain.</em>
+</p>
 
-- **Next.js 14** - Modern React framework with App Router
-- **Turborepo** - High-performance build system for monorepos
-- **XRPL Integration** - Full XRPL client with WebSocket support
-- **Multi-Wallet Support** - Connect with Xaman, Crossmark, GemWallet, or manual address
-- **Network Switching** - Easy switching between AlphaNet, Testnet, and Devnet
-- **Smart Contract Tools** - Deploy and interact with XRPL smart contracts
-- **Faucet Integration** - Request test XRP directly from the UI
-- **Transaction History** - View your transaction history with explorer links
-- **Debug Panel** - Execute custom XRPL commands and view network info
-- **Sample Contract** - Counter contract example in Rust
+<p align="center">
+  <img src="https://img.shields.io/badge/XRPL-Testnet-blue?style=flat-square" alt="XRPL" />
+  <img src="https://img.shields.io/badge/Agents-5%20Bees-f5c542?style=flat-square" alt="Bees" />
+  <img src="https://img.shields.io/badge/MCP-Enabled-34d399?style=flat-square" alt="MCP" />
+  <img src="https://img.shields.io/badge/License-MIT-white?style=flat-square" alt="License" />
+</p>
+
+---
+
+## The Problem
+
+Impact funding suffers from opacity. Donors send money and hope for the best. NGOs spend time on bureaucratic reporting instead of impact. There is no standardized way to verify outcomes, release funds conditionally, or build on-chain reputation.
+
+## The Solution
+
+**BumbleBee** is a swarm of 5 autonomous agents ("Bees") that manage the entire lifecycle of impact funding on the XRP Ledger. NGOs submit campaigns via Telegram, and the Bees take it from there — evaluating proposals, creating escrow contracts, verifying milestone evidence, and publishing trust scores. Donors monitor everything through a real-time dashboard.
+
+Every action is auditable. Every fund release is conditional. Every score lives on-chain.
+
+## How It Works
+
+```
+  NGO submits via Telegram
+           │
+     ┌─────▼─────┐
+     │ Facilitator │  ← Campaign intake & structuring
+     └─────┬─────┘
+           │
+     ┌─────▼─────┐
+     │  Evaluator  │  ← Due diligence scoring (60+ to pass)
+     └─────┬─────┘
+           │
+     ┌─────▼─────┐
+     │  Treasury   │  ← Escrow creation & milestone payments
+     └─────┬─────┘
+           │
+     ┌─────▼─────┐
+     │  Verifier   │  ← Evidence review & milestone approval
+     └─────┬─────┘
+           │
+     ┌─────▼─────┐
+     │  Reviewer   │  ← Trust scoring & on-chain reputation
+     └───────────┘
+           │
+    Donor monitors via Dashboard
+```
+
+### The 5 Bees
+
+| Bee | Role | What It Does |
+|-----|------|-------------|
+| **Facilitator** | Campaign Intake | Receives NGO proposals via Telegram, extracts structured data using LLM, creates campaign records |
+| **Evaluator** | Due Diligence | Scores campaigns on description quality, sector clarity, and funding reasonability. Generates 3 milestones |
+| **Treasury** | Escrow & Funds | Allocates funds from pool, creates XRPL escrow contracts with crypto-conditions, releases payments on approval |
+| **Verifier** | Evidence Review | Reviews submitted evidence (photos, documents), approves or rejects milestones with feedback |
+| **Reviewer** | Trust Scoring | Calculates trust scores (speed + quality + utilization), publishes via Oracle, issues credentials |
+
+### Campaign Lifecycle
+
+1. **Submit** — NGO describes their project via Telegram (natural language or `/campaign`)
+2. **Evaluate** — Evaluator Bee scores the proposal; 60+ threshold to proceed
+3. **Fund** — Treasury Bee creates 3 escrow contracts on XRPL, auto-releases M1 seed funding
+4. **Execute** — NGO works on milestones, submits evidence via Telegram
+5. **Verify** — Verifier Bee reviews evidence, approves/rejects with feedback
+6. **Score** — Reviewer Bee calculates trust score and publishes it on-chain via Oracle
+
+Each milestone payment is gated by a **PREIMAGE-SHA-256 crypto-condition** — funds cannot be released without verified fulfillment.
+
+## Architecture
+
+```
+bumblebee/
+├── apps/
+│   └── web/                  # Next.js 14 monitoring dashboard
+│       ├── app/              # App Router pages
+│       ├── components/ui/    # shadcn + custom components
+│       └── components/       # Dashboard-specific components
+├── packages/
+│   └── agents/               # 5-Bee agent swarm
+│       ├── src/bees/         # Individual bee handlers
+│       ├── src/db/           # SQLite schema & queries
+│       ├── src/services/     # XRPL, MCP, escrow, trust scoring
+│       └── src/bridge/       # WebSocket bridge to dashboard
+├── turbo.json
+└── pnpm-workspace.yaml
+```
+
+## Tech Stack
+
+### Agent Swarm
+- **Telegraf** — Telegram bot framework for NGO interface
+- **Gemini 2.0 Flash** — LLM for natural language understanding & data extraction
+- **Groq** — Fallback LLM (free tier, fast)
+- **xrpl.js** — Direct XRPL ledger interaction
+- **MCP SDK** — Model Context Protocol for DIDs, Oracles, Credentials
+- **five-bells-condition** — RFC crypto-conditions for escrow gates
+- **SQLite** — Persistent state (campaigns, milestones, escrows, trust scores)
+- **ElizaOS** — Agent framework foundation
+
+### Monitoring Dashboard
+- **Next.js 14** — React framework with App Router
+- **Tailwind CSS** — Utility-first styling with custom dark theme
+- **Framer Motion** — Smooth animations and transitions
+- **Lucide React** — Consistent iconography
+- **WebSocket** — Real-time event streaming from agent swarm
+- **shadcn/ui** — Component primitives (New York style)
+
+### XRPL Features Used
+- **Escrow** — Conditional fund releases with crypto-conditions
+- **DIDs** — Per-bee decentralized identifiers for auditability
+- **Oracle** — On-chain trust score publication
+- **Credentials** — Campaign completion certificates
+
+### Infrastructure
+- **Turborepo** — Monorepo build orchestration
+- **pnpm** — Fast, disk-efficient package manager
 
 ## Quick Start
 
 ### Prerequisites
 
-- Node.js 18+ and pnpm 8+
-- Rust (optional, for building contracts)
+- Node.js 18+
+- pnpm 8+
 
 ### Installation
 
-```
-# Clone the repository
-git clone https://github.com/yourusername/scaffold-xrp.git
-cd scaffold-xrp
-
-# Install dependencies
+```bash
+git clone https://github.com/joyosive/bumblebee.git
+cd bumblebee
 pnpm install
-
-# Start the development server
-pnpm dev
 ```
 
-The app will be available at [http://localhost:3000](http://localhost:3000)
+### Environment Setup
 
-## Project Structure
-
-```
-scaffold-xrp/
-├── apps/
-│   └── web/                 # Next.js application
-│       ├── app/             # Next.js App Router
-│       ├── components/      # React components
-│       └── lib/             # Utilities and configurations
-├── packages/
-│   └── bedrock/             # Smart contracts (Rust)
-│       ├── src/
-│       │   └── lib.rs       # Counter contract example
-│       └── Cargo.toml
-├── package.json
-├── pnpm-workspace.yaml
-└── turbo.json
+```bash
+cp packages/agents/.env.example packages/agents/.env
 ```
 
-## Usage
+Configure the following in `packages/agents/.env`:
 
-### Connecting Your Wallet
+```env
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token
 
-1. Click "Connect Wallet" in the header
-2. Choose your wallet (Xaman, Crossmark, GemWallet) or enter address manually
-3. Approve the connection in your wallet extension
+# LLM
+GOOGLE_API_KEY=your_gemini_key
+GROQ_API_KEY=your_groq_key          # optional fallback
 
-### Getting Test XRP
-
-1. Connect your wallet
-2. Go to the "Faucet" section
-3. Click "Request Test XRP"
-4. Wait for the transaction to complete
-
-### Deploying a Smart Contract
-
-1. Build your contract (see [Building Contracts](#building-contracts))
-2. Go to "Deploy Contract"
-3. Upload your `.wasm` file
-4. Confirm the transaction (requires 100 XRP fee)
-5. Copy the contract address from the confirmation
-
-### Interacting with Contracts
-
-1. Go to "Interact with Contract"
-2. Enter the contract address
-3. Enter the function name (e.g., `increment`)
-4. Add arguments if needed
-5. Click "Call Contract Function"
-6. Confirm the transaction in your wallet
-
-## Building Contracts
-
-### Install Rust
-
-```
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
+# Network
+XRPL_NETWORK=testnet
+XRPL_WSS=wss://s.altnet.rippletest.net:51233
 ```
 
-### Build the Counter Contract
+### Run
 
-```
-cd packages/bedrock
-cargo build --target wasm32-unknown-unknown --release
-```
+```bash
+# Start the monitoring dashboard
+pnpm --filter web dev
 
-The compiled WASM file will be at:
-```
-target/wasm32-unknown-unknown/release/counter.wasm
+# Start the agent swarm (separate terminal)
+pnpm --filter impactbee-agents dev
 ```
 
-See [packages/bedrock/README.md](packages/bedrock/README.md) for more details.
+Dashboard: [http://localhost:3000](http://localhost:3000)
+
+### Telegram Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message |
+| `/campaign` | Submit a new campaign |
+| `/submit <n>` | Submit evidence for milestone n |
+| `/mystatus` | View your campaign status |
+| `/pool` | Check treasury balance |
+| `/help` | List all commands |
+
+NGOs can also just type naturally — the Facilitator Bee uses LLM intent detection to understand what you need.
+
+## Wallet Architecture
+
+BumbleBee uses **5 separate XRPL wallets** — one per Bee. Each wallet has its own DID registered on-chain, providing full auditability of which agent performed which action.
+
+```
+Treasury  ── Holds pool funds, creates escrows
+Facilitator ── Registers campaigns on-chain
+Evaluator ── Records evaluation scores
+Verifier ── Issues verification records
+Reviewer ── Publishes trust scores via Oracle
+```
+
+## Trust Scoring
+
+Campaigns that reach completion receive a trust score (0–100) based on three dimensions:
+
+| Dimension | Weight | Criteria |
+|-----------|--------|----------|
+| **Speed** | 35 pts | How quickly milestones were completed |
+| **Quality** | 35 pts | First-time approval vs. revisions needed |
+| **Utilization** | 30 pts | Percentage of milestones completed |
+
+Trust scores are published on-chain via **XRPL Oracle** and can be queried by any application — building a portable, verifiable reputation for NGOs.
 
 ## Development
 
-### Available Commands
-
-```
-pnpm dev          # Start development server
+```bash
+pnpm dev          # Start all packages
 pnpm build        # Build all packages
 pnpm lint         # Lint all packages
-pnpm format       # Format code with Prettier
+pnpm format       # Format with Prettier
 pnpm clean        # Clean build artifacts
-```
-
-### Environment Variables
-
-Create a `.env.local` file in `apps/web/`:
-
-```
-# Optional: Configure default network
-NEXT_PUBLIC_DEFAULT_NETWORK=alphanet
 ```
 
 ## Networks
 
-### AlphaNet (Default)
-- **WebSocket:** wss://alphanet.nerdnest.xyz
-- **Network ID:** 21465
-- **Faucet:** https://alphanet.faucet.nerdnest.xyz/accounts
-- **Explorer:** https://alphanet.xrpl.org
-
-### Testnet
-- **WebSocket:** wss://s.altnet.rippletest.net:51233
-- **Network ID:** 1
-- **Faucet:** https://faucet.altnet.rippletest.net/accounts
-- **Explorer:** https://testnet.xrpl.org
-
-### Devnet
-- **WebSocket:** wss://s.devnet.rippletest.net:51233
-- **Network ID:** 2
-- **Faucet:** https://faucet.devnet.rippletest.net/accounts
-- **Explorer:** https://devnet.xrpl.org
-
-## Components
-
-### Core Components
-
-- **Header** - Navigation with wallet connection and network switching
-- **AccountInfo** - Display wallet address and balance
-- **FaucetRequest** - Request test XRP from network faucet
-- **ContractDeployment** - Upload and deploy WASM contracts
-- **ContractInteraction** - Call contract functions
-- **TransactionHistory** - View transaction history
-- **DebugPanel** - Execute custom XRPL commands
-
-### Providers
-
-- **XRPLProvider** - Global state for XRPL connection, wallet, and network
-
-## Technologies
-
-- [Next.js 14](https://nextjs.org/)
-- [React 18](https://react.dev/)
-- [Tailwind CSS](https://tailwindcss.com/)
-- [Turborepo](https://turbo.build/)
-- [xrpl.js](https://js.xrpl.org/)
-- [Bedrock](https://github.com/XRPL-Commons/Bedrock)
-
-## Resources
-
-- [XRPL Documentation](https://xrpl.org/)
-- [XRPL Smart Contracts Guide](https://xrpl.org/docs.html)
-- [Bedrock GitHub](https://github.com/XRPL-Commons/Bedrock)
-- [Scaffold-ETH-2](https://github.com/scaffold-eth/scaffold-eth-2)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+| Network | WebSocket | Explorer |
+|---------|-----------|----------|
+| Testnet | `wss://s.altnet.rippletest.net:51233` | [testnet.xrpl.org](https://testnet.xrpl.org) |
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT
 
-## Acknowledgments
+---
 
-- Inspired by [Scaffold-ETH-2](https://github.com/scaffold-eth/scaffold-eth-2)
-- Built for the XRPL community
-- Uses [Bedrock](https://github.com/XRPL-Commons/Bedrock) for smart contract development
+<p align="center">
+  Built by <a href="https://github.com/joyosive">joyosive</a> for EPFL Social Impact
+</p>

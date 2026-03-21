@@ -68,5 +68,5 @@ export async function completeCampaign(campaignId: string): Promise<string> {
   const onChain = oracleTxHash ? `\nOracle: published on-chain` : '';
   const cred = credentialTxHash ? `\nCredential: issued` : '';
 
-  return `Campaign complete.\n\n${scoreReport}${onChain}${cred}`;
+  return `[ReviewerBee] Campaign complete.\n\n${scoreReport}${onChain}${cred}`;
 }

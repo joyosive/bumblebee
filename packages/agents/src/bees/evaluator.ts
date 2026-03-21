@@ -51,7 +51,7 @@ export function evaluateCampaign(campaignId: string): {
     return {
       approved: true,
       score,
-      message: `Approved. Score: ${score}/100.\n\n3 milestones set:\n${templates.map((t, i) => `  ${i + 1}. ${t.title}`).join('\n')}\n\nAllocating funds from treasury.`,
+      message: `[EvaluatorBee] Approved. Score: ${score}/100.\n\n3 milestones set:\n${templates.map((t, i) => `  ${i + 1}. ${t.title}`).join('\n')}\n\nPassing to TreasuryBee for fund allocation...`,
     };
   } else {
     updateCampaignStatus(campaignId, 'rejected', { evaluation_score: score });
@@ -60,7 +60,7 @@ export function evaluateCampaign(campaignId: string): {
     return {
       approved: false,
       score,
-      message: `Not approved (score: ${score}/100). Need more detail in the campaign description and a clear sector alignment. Resubmit with /campaign.`,
+      message: `[EvaluatorBee] Not approved (score: ${score}/100). Need more detail in the campaign description and a clear sector alignment. Resubmit with /campaign.`,
     };
   }
 }

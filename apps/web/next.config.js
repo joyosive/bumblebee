@@ -1,8 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // Empty turbopack config to allow webpack config to work with Next.js 16+
-  turbopack: {},
+  transpilePackages: ["@splinetool/react-spline", "@splinetool/runtime"],
   webpack: (config, { isServer }) => {
     if (!isServer) {
       // Add polyfills for Node.js modules

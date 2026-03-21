@@ -23,23 +23,42 @@ import { completeCampaign } from './bees/reviewer.js';
 import { getCampaignsByNgo, getCampaignsByStatus, getMilestones, updateMilestone } from './db/database.js';
 import type { Campaign, Milestone, BeeName } from './data/types.js';
 
-// ── Gemini (key rotation) ────────────────────────────────────────────
+// ── LLM (Groq primary, Gemini fallback) ─────────────────────────────
+
+const GROQ_KEYS = (process.env.GROQ_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+let groqKeyIndex = 0;
+
+async function askGroq(systemPrompt: string, userMessage: string): Promise<string | null> {
+  if (GROQ_KEYS.length === 0) return null;
+  for (let attempt = 0; attempt < GROQ_KEYS.length; attempt++) {
+    const key = GROQ_KEYS[groqKeyIndex % GROQ_KEYS.length];
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          max_tokens: 500,
+          temperature: 0.7,
+        }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const data = await res.json() as any;
+      return data.choices?.[0]?.message?.content || null;
+    } catch (err: any) {
+      console.log(`[GROQ] Key ${groqKeyIndex + 1} failed:`, err.message?.slice(0, 60));
+      groqKeyIndex = (groqKeyIndex + 1) % GROQ_KEYS.length;
+    }
+  }
+  return null;
+}
 
 const GEMINI_KEYS = (process.env.GOOGLE_API_KEYS || process.env.GOOGLE_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
 let currentKeyIndex = 0;
-
-function getGeminiModel() {
-  const key = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
-  const ai = new GoogleGenerativeAI(key);
-  return ai.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
-}
-
-function rotateKey() {
-  if (GEMINI_KEYS.length > 1) {
-    currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
-    console.log(`[GEMINI] Rotated to key ${currentKeyIndex + 1}/${GEMINI_KEYS.length}`);
-  }
-}
 
 // Track conversation state per user
 interface UserState {
@@ -54,18 +73,25 @@ const userState = new Map<string, UserState>();
 // Campaign intake prompt — one message, Gemini or manual parse
 const CAMPAIGN_PROMPT = `Tell me about your campaign in one message. Include:\n- Organization name\n- Campaign title\n- What it does\n- Sector (Education, Healthcare, WASH, Agriculture, Energy, Environment)\n- Country\n- Amount needed in XRP`;
 
-async function askGemini(systemPrompt: string, userMessage: string): Promise<string | null> {
-  for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
+async function askLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
+  // Try Groq first (fast, reliable free tier)
+  const groqResponse = await askGroq(systemPrompt, userMessage);
+  if (groqResponse) return groqResponse;
+
+  // Fallback to Gemini with key rotation
+  for (let attempt = 0; attempt < Math.max(GEMINI_KEYS.length, 1); attempt++) {
     try {
-      const model = getGeminiModel();
+      const key = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
+      if (!key) break;
+      const ai = new GoogleGenerativeAI(key);
+      const model = ai.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
       const result = await model.generateContent(`${systemPrompt}\n\nUser: ${userMessage}`);
       return result.response.text();
     } catch (err: any) {
       console.log(`[GEMINI] Key ${currentKeyIndex + 1} failed:`, err.message?.slice(0, 60));
-      rotateKey();
+      currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
     }
   }
-  console.log('[GEMINI] All keys exhausted');
   return null;
 }
 
@@ -200,7 +226,7 @@ async function main() {
           } else {
             // Release this milestone's escrow
             const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(`Milestone ${milestoneNum} verified.\n${releaseMsg}`);
+            ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
           }
         }
       }
@@ -234,7 +260,7 @@ async function main() {
             ctx.reply(completionMsg);
           } else {
             const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(`Milestone ${milestoneNum} verified.\n${releaseMsg}`);
+            ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
           }
         }
       }
@@ -256,25 +282,54 @@ async function main() {
     console.log(`[MSG] ${userId}: "${text.slice(0, 80)}"`);
 
     try {
-      // Campaign intake — parse single message
+      // Campaign intake mode
       if (state?.mode === 'campaign_intake') {
-        // Try Gemini extraction first
-        const geminiResponse = await askGemini(getFacilitatorSystemPrompt(), text);
-        let campaignData = geminiResponse ? parseCampaignFromGemini(geminiResponse) : null;
+        // Cancel words
+        if (['no', 'cancel', 'stop', 'exit', 'back', 'nevermind'].includes(lower.trim())) {
+          userState.delete(userId);
+          ctx.reply('Cancelled. Let me know when you want to start.');
+          return;
+        }
 
-        // Fallback: simple extraction from message
+        // Need minimum info — check if message has enough substance
+        if (text.trim().length < 20) {
+          ctx.reply('Need more detail. Describe your org, what the campaign does, sector, country, and amount in XRP — all in one message.');
+          return;
+        }
+
+        // Try LLM extraction
+        const llmResponse = await askLLM(getFacilitatorSystemPrompt(), text);
+        let campaignData = llmResponse ? parseCampaignFromGemini(llmResponse) : null;
+
+        // Fallback: line-by-line extraction
         if (!campaignData) {
+          const lines = text.split('\n').map(l => l.replace(/^[-•*]\s*/, '').trim()).filter(Boolean);
           const sectors = ['Education', 'Healthcare', 'WASH', 'Agriculture', 'Energy', 'Environment'];
           const foundSector = sectors.find(s => lower.includes(s.toLowerCase())) || 'Education';
           const amountMatch = text.match(/(\d+)\s*XRP/i);
           const amount = amountMatch ? parseFloat(amountMatch[1]) : 3;
 
+          // Try to extract from labeled lines (e.g. "Org name is X" or "Organization name: X")
+          const extract = (keys: string[]): string => {
+            for (const line of lines) {
+              const ll = line.toLowerCase();
+              if (keys.some(k => ll.includes(k))) {
+                return line.replace(/^.*?(?:is|:)\s*/i, '').trim() || line;
+              }
+            }
+            return '';
+          };
+
+          const orgName = extract(['org', 'organization']) || lines[0] || 'NGO';
+          const title = extract(['campaign', 'title', 'name']) || lines[1] || text.slice(0, 60);
+          const country = extract(['country', 'region', 'location']) || 'Global';
+
           campaignData = {
-            ngo_name: text.split(',')[0]?.trim().slice(0, 60) || 'NGO',
-            title: text.split(',')[1]?.trim().slice(0, 60) || text.slice(0, 60),
+            ngo_name: orgName.slice(0, 60),
+            title: title.slice(0, 60),
             description: text,
             sector: foundSector,
-            country: 'Global',
+            country,
             funding_goal: Math.min(amount, 10),
           };
         }
@@ -295,27 +350,25 @@ async function main() {
         return;
       }
 
-      // Intent: submit evidence / finished / done
-      if (lower.includes('finish') || lower.includes('done') || lower.includes('completed') || lower.includes('evidence') || lower.includes('submit')) {
-        const campaigns = getCampaignsByNgo(userId) as Campaign[];
-        const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
-        if (activeCampaign) {
-          const milestones = getMilestones(activeCampaign.id) as Milestone[];
-          const activeMilestone = milestones.find(m => m.status === 'active');
-          if (activeMilestone) {
-            userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: activeMilestone.number.toString() });
-            ctx.reply(`Send evidence for milestone ${activeMilestone.number}: "${activeMilestone.title}"\n\nAttach a photo or document.`);
-          } else {
-            ctx.reply('All milestones are either completed or pending. Use /mystatus to check.');
-          }
+      // Check if user has an active campaign — route "done/okay/finished/next" to evidence
+      const userCampaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = userCampaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+
+      if (activeCampaign && (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('next') || lower.includes('okay') || lower.includes('ok') || lower.includes('submit') || lower.includes('evidence') || lower.match(/^m\d/))) {
+        const milestones = getMilestones(activeCampaign.id) as Milestone[];
+        const activeMilestone = milestones.find(m => m.status === 'active');
+        if (activeMilestone) {
+          userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: activeMilestone.number.toString() });
+          ctx.reply(`[FacilitatorBee] Ready for milestone ${activeMilestone.number}: "${activeMilestone.title}"\n\nAttach a photo or document as evidence.`);
         } else {
-          ctx.reply('No active campaign. Use /campaign to start one.');
+          const allDone = milestones.every(m => m.status === 'completed');
+          ctx.reply(allDone ? 'All milestones completed. Campaign is done.' : 'No active milestone right now. Use /mystatus to check.');
         }
         return;
       }
 
       // Intent: start a campaign
-      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding')) {
+      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding') || lower.includes('ngo')) {
         userState.set(userId, { mode: 'campaign_intake' });
         ctx.reply(CAMPAIGN_PROMPT);
         return;
@@ -323,7 +376,7 @@ async function main() {
 
       // General chat — try Gemini, smart fallback if unavailable
       const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct, short, no emojis. If someone describes a project, suggest /campaign. Status check: /mystatus. Treasury: /pool.`;
-      const response = await askGemini(companionPrompt, text);
+      const response = await askLLM(companionPrompt, text);
       if (response) {
         ctx.reply(response);
       } else if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello') || lower.includes('sup') || lower.includes('yo')) {

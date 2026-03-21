@@ -48,7 +48,7 @@ export function handleCampaignCreate(data: {
 
   return {
     campaignId,
-    message: `Campaign received.\n\n"${data.title}"\n${data.sector} | ${data.country}\nGoal: ${data.funding_goal} XRP\n\nEvaluating now.`,
+    message: `[FacilitatorBee] Campaign received.\n\n"${data.title}"\n${data.sector} | ${data.country}\nGoal: ${data.funding_goal} XRP\n\nPassing to EvaluatorBee...`,
   };
 }
 
@@ -74,21 +74,23 @@ export function handleSubmitEvidence(
   emitEvent({ agent: 'facilitator', type: 'work', message: `Evidence submitted for milestone ${milestoneNum}`, timestamp: Date.now() });
 
   return {
-    message: `Evidence received for milestone ${milestoneNum}. ${allIds.length} file(s) attached. Sending to VerifierBee for review.`,
+    message: `[FacilitatorBee] Evidence received for milestone ${milestoneNum}. ${allIds.length} file(s) attached.\n\nPassing to VerifierBee...`,
     milestone: { ...milestone, status: 'submitted' },
   };
 }
 
 export function handleMyStatus(telegramId: string): string {
   const campaigns = getCampaignsByNgo(telegramId) as Campaign[];
-  if (campaigns.length === 0) return 'No campaigns yet. Send /campaign to start one.';
+  if (campaigns.length === 0) return '[FacilitatorBee] No campaigns yet. Send /campaign to start one.';
 
-  return campaigns.map(c => {
+  const list = campaigns.map(c => {
     const milestones = getMilestones(c.id) as Milestone[];
     const msStatus = milestones.map(m => {
-      const icon = m.status === 'completed' ? '✓' : m.status === 'active' ? '→' : m.status === 'submitted' ? '⏳' : '·';
-      return `  ${icon} M${m.number}: ${m.status}`;
+      const icon = m.status === 'completed' ? '[done]' : m.status === 'active' ? '[active]' : m.status === 'submitted' ? '[reviewing]' : '[pending]';
+      return `  M${m.number} ${icon} ${m.title}`;
     }).join('\n');
-    return `${c.title} [${c.status}]\n${c.sector} | ${c.country} | ${c.funding_goal} XRP\n${msStatus}`;
+    return `"${c.title}" [${c.status}]\n${c.sector} | ${c.country} | ${c.funding_goal} XRP\n${msStatus}`;
   }).join('\n\n');
+
+  return `[FacilitatorBee] Your campaigns:\n\n${list}`;
 }
