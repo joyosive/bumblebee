@@ -24,6 +24,7 @@
     "xrpl": "^4.6.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^25.5.0",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
