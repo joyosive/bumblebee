@@ -44,6 +44,8 @@ pnpm-debug.log*
 # SQLite
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
 
 # Superpowers docs (local only)
 docs/superpowers/
