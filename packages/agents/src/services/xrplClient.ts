@@ -137,6 +137,107 @@ export async function sendRLUSD(
 /**
  * Check RLUSD balance for an account.
  */
+// ── MPT (Multi-Purpose Token) Support ────────────────────────────
+
+/**
+ * Create an MPT issuance (defines a new token class).
+ * Treasury calls this once to create the "TrustScore" token.
+ */
+export async function createMPTIssuance(
+  issuerSeed: string,
+  metadata: string,
+  maxAmount?: string,
+): Promise<{ txHash: string; mptIssuanceId: string }> {
+  const xrpl = await getXrplClient();
+  const wallet = getWallet(issuerSeed);
+
+  const tx: any = {
+    TransactionType: 'MPTokenIssuanceCreate',
+    Account: wallet.address,
+    AssetScale: 0,
+    Flags: 2, // lsfMPTCanTransfer — allow transfers
+    MPTokenMetadata: Buffer.from(metadata).toString('hex').toUpperCase(),
+  };
+  if (maxAmount) tx.MaximumAmount = maxAmount;
+
+  const prepared = await xrpl.autofill(tx);
+  const result = await xrpl.submitAndWait(prepared, { wallet });
+  const txHash = typeof result.result.hash === 'string' ? result.result.hash : '';
+
+  const meta = result.result.meta as any;
+  if (meta?.TransactionResult !== 'tesSUCCESS') {
+    throw new Error(`MPT issuance failed: ${meta?.TransactionResult}`);
+  }
+
+  // Extract MPTokenIssuanceID from created nodes
+  const createdNode = meta?.AffectedNodes?.find(
+    (n: any) => n.CreatedNode?.LedgerEntryType === 'MPTokenIssuance',
+  );
+  const mptIssuanceId = createdNode?.CreatedNode?.LedgerIndex || '';
+
+  return { txHash, mptIssuanceId };
+}
+
+/**
+ * Authorize an account to hold a specific MPT.
+ * NGO must call this before receiving trust score tokens.
+ */
+export async function authorizeMPT(
+  holderSeed: string,
+  mptIssuanceId: string,
+): Promise<{ txHash: string }> {
+  const xrpl = await getXrplClient();
+  const wallet = getWallet(holderSeed);
+
+  const prepared = await xrpl.autofill({
+    TransactionType: 'MPTokenAuthorize' as any,
+    Account: wallet.address,
+    MPTokenIssuanceID: mptIssuanceId,
+  } as any);
+
+  const result = await xrpl.submitAndWait(prepared, { wallet });
+  const txHash = typeof result.result.hash === 'string' ? result.result.hash : '';
+  const meta = result.result.meta as any;
+  if (meta?.TransactionResult !== 'tesSUCCESS') {
+    throw new Error(`MPT authorize failed: ${meta?.TransactionResult}`);
+  }
+
+  return { txHash };
+}
+
+/**
+ * Send MPT tokens from issuer to destination.
+ * Used to send trust score as an on-chain token.
+ */
+export async function sendMPT(
+  senderSeed: string,
+  destinationAddress: string,
+  mptIssuanceId: string,
+  amount: string,
+): Promise<{ txHash: string }> {
+  const xrpl = await getXrplClient();
+  const wallet = getWallet(senderSeed);
+
+  const prepared = await xrpl.autofill({
+    TransactionType: 'Payment',
+    Account: wallet.address,
+    Destination: destinationAddress,
+    Amount: {
+      mpt_issuance_id: mptIssuanceId,
+      value: amount,
+    } as any,
+  });
+
+  const result = await xrpl.submitAndWait(prepared, { wallet });
+  const txHash = typeof result.result.hash === 'string' ? result.result.hash : '';
+  const meta = result.result.meta as any;
+  if (meta?.TransactionResult !== 'tesSUCCESS') {
+    throw new Error(`MPT payment failed: ${meta?.TransactionResult}`);
+  }
+
+  return { txHash };
+}
+
 export async function getRLUSDBalance(address: string): Promise<string> {
   const xrpl = await getXrplClient();
   const issuer = getRLUSDIssuer();

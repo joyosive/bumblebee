@@ -42,7 +42,7 @@ async function askGroq(systemPrompt: string, userMessage: string): Promise<strin
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage },
           ],
-          max_tokens: 500,
+          max_tokens: 1024,
           temperature: 0.7,
         }),
       });
@@ -71,7 +71,7 @@ interface UserState {
 const userState = new Map<string, UserState>();
 
 // Campaign intake prompt — one message, Gemini or manual parse
-const CAMPAIGN_PROMPT = `Tell me about your campaign in one message. Include:\n- Organization name\n- Campaign title\n- What it does\n- Sector (Education, Healthcare, WASH, Agriculture, Energy, Environment)\n- Country\n- Amount needed in XRP`;
+const CAMPAIGN_PROMPT = `Tell me about your campaign in one message. Include:\n- Organization name\n- Campaign title\n- What it does\n- Sector (Education, Healthcare, WASH, Agriculture, Energy, Environment)\n- Country\n- Funding amount (in XRP)`;
 
 async function askLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
   // Try Groq first (fast, reliable free tier)
@@ -103,6 +103,11 @@ async function main() {
   // 1. Database
   initDB();
   console.log('   DB: SQLite initialized');
+
+  // 1b. LLM health check
+  console.log(`   LLM: Groq keys: ${GROQ_KEYS.length}, Gemini keys: ${GEMINI_KEYS.length}`);
+  const llmTest = await askLLM('Reply with OK', 'test');
+  console.log(`   LLM: ${llmTest ? 'Connected (' + (GROQ_KEYS.length ? 'Groq' : 'Gemini') + ')' : 'UNAVAILABLE — check API keys'}`);
 
   // 2. Infrastructure
   initBridgeServer();
@@ -249,7 +254,7 @@ async function main() {
               ctx.reply(completionMsg);
             } else {
               const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+              ctx.reply(`[VerifierBee] Evidence verified. Releasing funds for milestone ${milestoneNum}.\n\n${releaseMsg}`);
             }
           } else {
             const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
@@ -260,89 +265,13 @@ async function main() {
 
       userState.delete(userId);
     } else {
-      // Auto-detect /submit N in caption or find active milestone
-      const caption = (ctx.message as any).caption || '';
-      const captionMatch = caption.match(/\/submit\s+(\d)/);
-      const campaigns = getCampaignsByNgo(userId) as Campaign[];
-      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
-
-      if (activeCampaign) {
-        let milestoneNum: number | null = null;
-        if (captionMatch) {
-          milestoneNum = parseInt(captionMatch[1]);
-        } else {
-          // Auto-detect: find the active or revision_needed milestone
-          const milestones = getMilestones(activeCampaign.id) as Milestone[];
-          const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
-          if (active) milestoneNum = active.number;
-        }
-
-        if (milestoneNum) {
-          const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-          userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: milestoneNum.toString() });
-          // Re-trigger by emitting to self — simpler: just inline the evidence flow
-          const result = handleSubmitEvidence(activeCampaign.id, milestoneNum, [fileId]);
-          ctx.reply(result.message);
-          if (result.milestone) {
-            const review = reviewEvidence(activeCampaign.id, milestoneNum);
-            if (review.hasEvidence && review.campaign && review.milestone) {
-              const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
-              ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
-              if (verdict.approved) {
-                const approveResult = approveMilestone(activeCampaign.id, milestoneNum);
-                if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
-                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
-                  ctx.reply(releaseMsg);
-                  const completionMsg = await completeCampaign(activeCampaign.id);
-                  ctx.reply(completionMsg);
-                } else {
-                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
-                  ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
-                }
-              } else {
-                const rejectResult = rejectMilestone(activeCampaign.id, milestoneNum, verdict.feedback);
-                ctx.reply(`[VerifierBee] ${rejectResult}`);
-              }
-            }
-          }
-          userState.delete(userId);
-          return;
-        }
-      }
-      ctx.reply('Got a photo. To submit evidence, use /submit <milestone_number> first, then attach files.');
+      ctx.reply('To submit evidence, first use /submit <milestone_number>, then attach your photo.');
     }
   });
 
   bot.on(message('document'), async (ctx) => {
     const userId = ctx.from.id.toString();
-    let state = userState.get(userId);
-
-    // Auto-detect /submit N in document caption
-    if (!state?.mode && ctx.message.caption) {
-      const captionMatch = ctx.message.caption.match(/\/submit\s+(\d)/);
-      if (captionMatch) {
-        const campaigns = getCampaignsByNgo(userId) as Campaign[];
-        const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
-        if (activeCampaign) {
-          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: captionMatch[1] };
-          userState.set(userId, state);
-        }
-      }
-    }
-
-    // If still no state, auto-detect active milestone
-    if (!state?.mode) {
-      const campaigns = getCampaignsByNgo(userId) as Campaign[];
-      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
-      if (activeCampaign) {
-        const milestones = getMilestones(activeCampaign.id) as Milestone[];
-        const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
-        if (active) {
-          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: active.number.toString() };
-          userState.set(userId, state);
-        }
-      }
-    }
+    const state = userState.get(userId);
 
     if (state?.mode === 'awaiting_evidence' && state.campaignId && state.context) {
       const fileId = ctx.message.document.file_id;
@@ -367,7 +296,7 @@ async function main() {
               ctx.reply(completionMsg);
             } else {
               const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+              ctx.reply(`[VerifierBee] Evidence verified. Releasing funds for milestone ${milestoneNum}.\n\n${releaseMsg}`);
             }
           } else {
             const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
@@ -404,7 +333,7 @@ async function main() {
 
         // Need minimum info — check if message has enough substance
         if (text.trim().length < 20) {
-          ctx.reply('Need more detail. Describe your org, what the campaign does, sector, country, and amount in XRP — all in one message.');
+          ctx.reply('Need more detail. Describe your org, what the campaign does, sector, country, and funding amount — all in one message.');
           return;
         }
 
@@ -520,7 +449,7 @@ async function main() {
 
   console.log(`\n BumbleBee is live!`);
   console.log(`   MCP: ${mcpReady ? 'Connected' : 'Not available (using direct xrpl.js)'}`);
-  console.log(`   RLUSD: ${process.env.RLUSD_ISSUER ? 'Enabled (dual-currency)' : 'XRP only'}`);
+  console.log(`   RLUSD: ${process.env.RLUSD_ISSUER ? 'Configured (trustlines ready)' : 'Not configured'}`);
   console.log(`   A2A: http://localhost:3002/.well-known/agent.json\n`);
 
   // 7. Milestone deadline checker (runs every hour)
