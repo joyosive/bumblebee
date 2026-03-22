@@ -130,6 +130,24 @@ export async function mcpGetAccountInfo(bee: BeeName, address: string) {
   return mcpCall(bee, 'get-account-info', { address, useTestnet: true });
 }
 
+// ── MPT wrappers ─────────────────────────────────────────
+
+export async function mcpMPTIssuanceCreate(bee: BeeName, opts: { metadata?: string; maxAmount?: string; canTransfer?: boolean; assetScale?: number }) {
+  return mcpCall(bee, 'mpt-issuance-create', { ...opts, useTestnet: true });
+}
+
+export async function mcpMPTAuthorize(bee: BeeName, mptIssuanceID: string) {
+  return mcpCall(bee, 'mpt-authorize', { mptIssuanceID, useTestnet: true });
+}
+
+export async function mcpMPTPayment(bee: BeeName, destination: string, mptIssuanceId: string, value: string) {
+  return mcpCall(bee, 'payment', {
+    destination,
+    amount: { mpt_issuance_id: mptIssuanceId, value },
+    useTestnet: true,
+  });
+}
+
 export async function mcpListTools(bee: BeeName): Promise<string[]> {
   const client = mcpClients.get(bee);
   if (!client) return [];

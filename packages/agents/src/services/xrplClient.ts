@@ -207,27 +207,38 @@ export async function authorizeMPT(
 
 /**
  * Send MPT tokens from issuer to destination.
- * Used to send trust score as an on-chain token.
+ * Optional memos array for on-chain data (e.g. trust score breakdown).
  */
 export async function sendMPT(
   senderSeed: string,
   destinationAddress: string,
   mptIssuanceId: string,
   amount: string,
+  memos?: Array<{ type: string; data: string }>,
 ): Promise<{ txHash: string }> {
   const xrpl = await getXrplClient();
   const wallet = getWallet(senderSeed);
 
-  const prepared = await xrpl.autofill({
+  const tx: any = {
     TransactionType: 'Payment',
     Account: wallet.address,
     Destination: destinationAddress,
     Amount: {
       mpt_issuance_id: mptIssuanceId,
       value: amount,
-    } as any,
-  });
+    },
+  };
 
+  if (memos?.length) {
+    tx.Memos = memos.map(m => ({
+      Memo: {
+        MemoType: Buffer.from(m.type).toString('hex').toUpperCase(),
+        MemoData: Buffer.from(m.data).toString('hex').toUpperCase(),
+      },
+    }));
+  }
+
+  const prepared = await xrpl.autofill(tx);
   const result = await xrpl.submitAndWait(prepared, { wallet });
   const txHash = typeof result.result.hash === 'string' ? result.result.hash : '';
   const meta = result.result.meta as any;
