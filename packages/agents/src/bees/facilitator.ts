@@ -24,10 +24,23 @@ export function parseCampaignFromGemini(response: string): {
   ngo_name: string; title: string; description: string;
   sector: string; country: string; funding_goal: number;
 } | null {
-  const match = response.match(/CAMPAIGN_DATA:(\{.*\})/);
-  if (!match) return null;
+  // Try multiple extraction patterns
+  let jsonStr: string | null = null;
+  const match = response.match(/CAMPAIGN_DATA:\s*(\{[\s\S]*\})/);
+  if (match) jsonStr = match[1];
+  if (!jsonStr) {
+    const codeBlock = response.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlock) jsonStr = codeBlock[1];
+  }
+  if (!jsonStr) {
+    const rawJson = response.match(/(\{[\s\S]*"ngo_name"[\s\S]*"title"[\s\S]*\})/);
+    if (rawJson) jsonStr = rawJson[1];
+  }
+  if (!jsonStr) return null;
   try {
-    return JSON.parse(match[1]);
+    jsonStr = jsonStr.replace(/[\x00-\x1f\x7f]/g, (c) => c === '\n' || c === '\r' || c === '\t' ? ' ' : '');
+    jsonStr = jsonStr.replace(/\n/g, ' ').replace(/,\s*}/g, '}');
+    return JSON.parse(jsonStr);
   } catch {
     return null;
   }

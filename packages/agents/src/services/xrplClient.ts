@@ -50,6 +50,9 @@ export function getExplorerUrl(txHash: string): string {
 
 // ── RLUSD Support ─────────────────────────────────────────────────
 
+// RLUSD currency code — hex-encoded "RLUSD" (40-char XRPL format for non-standard currencies)
+const RLUSD_CURRENCY_HEX = '524C555344000000000000000000000000000000';
+
 // RLUSD issuer address (configurable via env)
 export function getRLUSDIssuer(): string {
   return process.env.RLUSD_ISSUER || '';
@@ -66,7 +69,7 @@ export function isRLUSDEnabled(): boolean {
 export async function createTrustLine(
   walletSeed: string,
   issuerAddress: string,
-  currency: string = 'USD',
+  currency: string = RLUSD_CURRENCY_HEX,
   limit: string = '1000000',
 ): Promise<{ txHash: string }> {
   const xrpl = await getXrplClient();
@@ -102,12 +105,18 @@ export async function sendRLUSD(
   const wallet = getWallet(senderSeed);
   const issuer = issuerAddress || getRLUSDIssuer();
 
+  // Check sender has RLUSD balance before attempting
+  const balance = await getRLUSDBalance(wallet.address);
+  if (parseFloat(balance) < parseFloat(amount)) {
+    throw new Error(`Insufficient RLUSD: have ${balance}, need ${amount}`);
+  }
+
   const prepared = await xrpl.autofill({
     TransactionType: 'Payment',
     Account: wallet.address,
     Destination: destinationAddress,
     Amount: {
-      currency: 'USD',
+      currency: RLUSD_CURRENCY_HEX,
       issuer,
       value: amount,
     },
@@ -115,6 +124,12 @@ export async function sendRLUSD(
 
   const tx = await xrpl.submitAndWait(prepared, { wallet });
   const txHash = typeof tx.result.hash === 'string' ? tx.result.hash : '';
+  const meta = tx.result.meta as any;
+  const resultCode = meta?.TransactionResult || '';
+
+  if (resultCode !== 'tesSUCCESS') {
+    throw new Error(`RLUSD tx failed: ${resultCode}`);
+  }
 
   return { txHash };
 }
@@ -133,7 +148,7 @@ export async function getRLUSDBalance(address: string): Promise<string> {
       account: address,
       peer: issuer,
     });
-    const line = (response.result as any).lines?.find((l: any) => l.currency === 'USD');
+    const line = (response.result as any).lines?.find((l: any) => l.currency === RLUSD_CURRENCY_HEX);
     return line?.balance || '0';
   } catch {
     return '0';

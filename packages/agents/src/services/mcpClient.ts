@@ -16,9 +16,10 @@ function getMCPServerPath(): string {
   if (process.env.MCP_SERVER_PATH) return process.env.MCP_SERVER_PATH;
 
   const candidates = [
-    path.resolve(__dirname, '../../../../mcp-xrpl'),           // sibling to bumblebee
-    path.resolve(__dirname, '../../../../mcp-xrpl/mcp-server'), // nested structure
-    path.resolve(__dirname, '../../../../../mcp-xrpl'),         // one level up
+    path.resolve(__dirname, '../../../../mcp-xrpl/mcp-server'), // submodule: bumblebee/mcp-xrpl/mcp-server
+    path.resolve(__dirname, '../../../../mcp-xrpl'),            // flat submodule
+    path.resolve(__dirname, '../../../../../mcp-xrpl/mcp-server'), // sibling repo nested
+    path.resolve(__dirname, '../../../../../mcp-xrpl'),         // sibling repo flat
   ];
 
   for (const p of candidates) {

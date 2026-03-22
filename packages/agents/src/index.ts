@@ -461,13 +461,13 @@ async function main() {
         return;
       }
 
-      // Check if user has an active campaign — route "done/okay/finished/next" to evidence
+      // Check if user has an active campaign — evidence routing takes priority
       const userCampaigns = getCampaignsByNgo(userId) as Campaign[];
       const activeCampaign = userCampaigns.find(c => ['funded', 'in_progress'].includes(c.status));
 
-      if (activeCampaign && (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('next') || lower.includes('okay') || lower.includes('ok') || lower.includes('submit') || lower.includes('evidence') || lower.match(/^m\d/))) {
+      if (activeCampaign && (/\b(done|finished|complete|submit|evidence|milestone|ready)\b/.test(lower) || /^(ok|okay|next|yes|yep|sure)$/i.test(lower.trim()) || /\bm\s*\d/i.test(lower))) {
         const milestones = getMilestones(activeCampaign.id) as Milestone[];
-        const activeMilestone = milestones.find(m => m.status === 'active');
+        const activeMilestone = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
         if (activeMilestone) {
           userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: activeMilestone.number.toString() });
           ctx.reply(`[FacilitatorBee] Ready for milestone ${activeMilestone.number}: "${activeMilestone.title}"\n\nAttach a photo or document as evidence.`);
@@ -478,20 +478,22 @@ async function main() {
         return;
       }
 
-      // Intent: start a campaign
-      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding') || lower.includes('ngo')) {
+      // Intent: start a new campaign
+      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding') || lower.includes('ngo') || lower.includes('initiative')) {
         userState.set(userId, { mode: 'campaign_intake' });
         ctx.reply(CAMPAIGN_PROMPT);
         return;
       }
 
-      // General chat — try Gemini, smart fallback if unavailable
-      const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct, short, no emojis. If someone describes a project, suggest /campaign. Status check: /mystatus. Treasury: /pool.`;
+      // General chat — try LLM, smart fallback if unavailable
+      const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct, short, no emojis. If someone says thanks or the campaign is done, congratulate them briefly. If someone describes a project, suggest /campaign. Status check: /mystatus. Do NOT suggest spending more money or starting new campaigns unprompted.`;
       const response = await askLLM(companionPrompt, text);
       if (response) {
         ctx.reply(response);
+      } else if (lower.includes('thank') || lower.includes('great') || lower.includes('awesome')) {
+        ctx.reply('Glad to help. Use /mystatus to review your campaigns anytime.');
       } else if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello') || lower.includes('sup') || lower.includes('yo')) {
-        ctx.reply('Hey. Ready when you are.\n\n/campaign — submit a funding request\n/mystatus — check progress\n/pool — treasury balance');
+        ctx.reply('Hey. Ready when you are.\n\n/campaign — submit a funding request\n/mystatus — check progress');
       } else if (lower.includes('help') || lower.includes('what') || lower.includes('how')) {
         ctx.reply('I manage impact funding on XRPL. NGOs submit campaigns, I evaluate them, set milestones, and release funds as you deliver.\n\nStart with /campaign');
       } else {

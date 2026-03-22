@@ -105,8 +105,8 @@ const BEE_ICONS = {
 
 function mapEventToStatus(type) {
   const map = {
-    spawn: { status: 'pending', energy: 50 },
-    work: { status: 'in-progress', energy: 80 },
+    spawn: { status: 'completed', energy: 60 },
+    work: { status: 'in-progress', energy: 85 },
     complete: { status: 'completed', energy: 100 },
     error: { status: 'error', energy: 20 },
   };
@@ -296,6 +296,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
+  const [walletBalance, setWalletBalance] = useState(null);
 
   // Compute dynamic bee timeline from base template + live status
   const beeTimeline = BASE_BEE_TIMELINE.map(bee => ({
@@ -304,12 +305,35 @@ export default function DashboardPage() {
     energy: beeStatus[bee.title.toLowerCase()]?.energy || bee.energy,
   }));
 
+  // Fetch wallet XRP balance from XRPL testnet
+  useEffect(() => {
+    if (!accountInfo?.address) return;
+
+    async function fetchBalance() {
+      try {
+        const { Client } = await import('xrpl');
+        const client = new Client('wss://s.altnet.rippletest.net:51233');
+        await client.connect();
+        const response = await client.request({
+          command: 'account_info',
+          account: accountInfo.address,
+          ledger_index: 'validated',
+        });
+        const drops = response.result.account_data.Balance;
+        setWalletBalance((parseInt(drops) / 1_000_000).toFixed(2));
+        await client.disconnect();
+      } catch {
+        setWalletBalance(null);
+      }
+    }
+    fetchBalance();
+  }, [accountInfo?.address]);
+
   // Redirect to landing if not connected
   useEffect(() => {
     const timer = setTimeout(() => {
       if (!isConnected && !accountInfo) {
-        // Give wallet manager time to auto-reconnect
-        // Don't redirect immediately
+        router.push('/');
       }
     }, 3000);
     return () => clearTimeout(timer);
@@ -377,8 +401,32 @@ export default function DashboardPage() {
               ...prev.slice(0, 49),
             ]);
 
-            // Update bee status
-            setBeeStatus(prev => ({ ...prev, [d.agent]: mapEventToStatus(d.type) }));
+            // Update bee status — active bees glow, then fade back after completion
+            const newStatus = mapEventToStatus(d.type);
+            setBeeStatus(prev => ({ ...prev, [d.agent]: newStatus }));
+
+            // Auto-fade: after "work" event, bee stays lit for 8s then returns to idle
+            // After "complete", bee glows green for 4s then returns to ready
+            if (d.type === 'work') {
+              setTimeout(() => {
+                setBeeStatus(prev => {
+                  // Only reset if still showing this status (hasn't been updated since)
+                  if (prev[d.agent]?.status === 'in-progress') {
+                    return { ...prev, [d.agent]: { status: 'completed', energy: 60 } };
+                  }
+                  return prev;
+                });
+              }, 8000);
+            } else if (d.type === 'complete') {
+              setTimeout(() => {
+                setBeeStatus(prev => {
+                  if (prev[d.agent]?.status === 'completed' && prev[d.agent]?.energy === 100) {
+                    return { ...prev, [d.agent]: { status: 'completed', energy: 60 } };
+                  }
+                  return prev;
+                });
+              }, 4000);
+            }
 
             // Refetch campaigns and stats on complete/error events (data changed)
             if (d.type === 'complete' || d.type === 'error') {
@@ -411,53 +459,49 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-background">
       {/* ── Header ──────────────────────────────────────── */}
       <header className="border-b border-border/50 bg-card/30">
-        <div className="max-w-[1440px] mx-auto flex items-center justify-between px-6 lg:px-8 h-16">
-          <div className="flex items-center gap-3">
-            <img src="/bumblebee.png" alt="BumbleBee" width={48} height={48} className="rounded-xl" />
+        <div className="max-w-[1440px] mx-auto flex items-center justify-between px-4 sm:px-6 lg:px-8 h-14 sm:h-16">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <img src="/bumblebee.png" alt="BumbleBee" width={36} height={36} className="rounded-xl sm:w-12 sm:h-12" />
             <div>
-              <h1 className="text-base font-extrabold text-foreground tracking-tight">BumbleBee</h1>
-              <p className="text-[11px] text-foreground/40 tracking-[0.2em] uppercase font-bold">Impact Monitor</p>
+              <h1 className="text-sm sm:text-base font-extrabold text-foreground tracking-tight">BumbleBee</h1>
+              <p className="text-[10px] sm:text-[11px] text-foreground/40 tracking-[0.2em] uppercase font-bold hidden sm:block">Impact Monitor</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:gap-4">
+            <div className="flex items-center gap-1.5 sm:gap-2">
               <div className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500" : "bg-amber-500"}`} />
-              <span className="text-sm text-foreground/50 font-semibold">{wsConnected ? "Live" : "Offline"}</span>
+              <span className="text-xs sm:text-sm text-foreground/50 font-semibold">{wsConnected ? "Live" : "Offline"}</span>
             </div>
 
-            <Badge
-              variant="outline"
-              className="rounded-full border-border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.15em] text-foreground/50"
-            >
+            <Badge variant="outline" className="rounded-full border-border px-2 sm:px-3 py-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.15em] text-foreground/50 hidden sm:inline-flex">
               XRPL Testnet
             </Badge>
 
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border">
-              <div className="w-2 h-2 rounded-full bg-amber-500" />
-              <span className="mono text-sm text-foreground/60 font-semibold">{walletAddress}</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-secondary border border-border">
+              <div className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span className="mono text-xs sm:text-sm text-foreground/60 font-semibold">{walletAddress}</span>
+              {walletBalance && (
+                <span className="mono text-xs sm:text-sm text-amber-500 font-bold ml-1 hidden sm:inline">{walletBalance} XRP</span>
+              )}
             </div>
 
-            <button
-              onClick={handleDisconnect}
-              className="p-2 rounded-lg hover:bg-secondary text-foreground/40 hover:text-foreground/70 transition-colors"
-              title="Disconnect wallet"
-            >
-              <LogOut size={16} />
+            <button onClick={handleDisconnect} className="p-1.5 sm:p-2 rounded-lg hover:bg-secondary text-foreground/40 hover:text-foreground/70 transition-colors" title="Disconnect wallet">
+              <LogOut size={14} className="sm:w-4 sm:h-4" />
             </button>
           </div>
         </div>
       </header>
 
       {/* ── Main Content ────────────────────────────────── */}
-      <div className="max-w-[1440px] mx-auto px-6 lg:px-8 py-6">
+      <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
 
         {/* ── Stats Row ────────────────────────────────── */}
         <motion.div
           variants={stagger}
           initial="hidden"
           animate="visible"
-          className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6"
+          className="grid grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3 mb-4 sm:mb-6"
         >
           <motion.div variants={fadeUp}>
             <StatCard label="Pool Balance" value={stats.pool_balance} unit="XRP" icon={Wallet} colorClass="text-yellow-600" />
@@ -494,13 +538,17 @@ export default function DashboardPage() {
                 </div>
                 <Badge
                   variant="outline"
-                  className="rounded-full border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-600"
+                  className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] ${
+                    wsConnected
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-600"
+                      : "border-amber-200 bg-amber-50 text-amber-600"
+                  }`}
                 >
                   <span className="relative flex h-2 w-2 mr-1.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${wsConnected ? "bg-emerald-400" : "bg-amber-400"} opacity-75`} />
+                    <span className={`relative inline-flex rounded-full h-2 w-2 ${wsConnected ? "bg-emerald-500" : "bg-amber-500"}`} />
                   </span>
-                  Running
+                  {wsConnected ? "Running" : "Offline"}
                 </Badge>
               </div>
 
@@ -532,7 +580,7 @@ export default function DashboardPage() {
               </div>
               <div className="flex items-center gap-2 text-sm text-foreground/50 font-medium">
                 <div className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500" : "bg-amber-400"}`} />
-                {wsConnected ? "Connected to agent swarm" : "Waiting for Telegram activity..."}
+                {wsConnected ? "Connected to agent swarm" : apiError ? "Agents offline — start the swarm" : "Connecting to agent swarm..."}
               </div>
             </Card>
 
@@ -646,7 +694,7 @@ export default function DashboardPage() {
         </motion.div>
 
         {/* ── Footer ─────────────────────────────────── */}
-        <div className="flex items-center justify-between mt-8 pt-4 border-t border-border/30">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2 mt-6 sm:mt-8 pt-4 border-t border-border/30">
           <span className="text-sm text-foreground/30 font-semibold">BumbleBee v2 &middot; EPFL Social Impact</span>
           <div className="flex items-center gap-3">
             {[

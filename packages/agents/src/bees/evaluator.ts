@@ -67,9 +67,26 @@ Description: ${campaign.description}`;
 
       const response = await askLLM(EVAL_SYSTEM_PROMPT, userPrompt);
       if (response) {
-        const match = response.match(/EVALUATION:(\{.*\})/s);
-        if (match) {
-          const parsed = JSON.parse(match[1]);
+        // Try multiple JSON extraction patterns (LLMs wrap in various formats)
+        let jsonStr: string | null = null;
+        const evalMatch = response.match(/EVALUATION:\s*(\{[\s\S]*\})/);
+        if (evalMatch) jsonStr = evalMatch[1];
+        if (!jsonStr) {
+          const codeBlock = response.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+          if (codeBlock) jsonStr = codeBlock[1];
+        }
+        if (!jsonStr) {
+          const rawJson = response.match(/(\{[\s\S]*"score"[\s\S]*"milestones"[\s\S]*\})/);
+          if (rawJson) jsonStr = rawJson[1];
+        }
+        if (jsonStr) {
+          // Clean common LLM artifacts
+          jsonStr = jsonStr.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+          // Remove control characters that break JSON
+          jsonStr = jsonStr.replace(/[\x00-\x1f\x7f]/g, (c) => c === '\n' || c === '\r' || c === '\t' ? ' ' : '');
+          // Fix unescaped newlines inside strings
+          jsonStr = jsonStr.replace(/\n/g, ' ');
+          const parsed = JSON.parse(jsonStr);
           score = Math.min(Math.max(parsed.score || 0, 0), 100);
           reasoning = parsed.reasoning || '';
           if (Array.isArray(parsed.milestones) && parsed.milestones.length === 3) {

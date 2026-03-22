@@ -87,8 +87,26 @@ export default function RadialOrbitalTimeline({ timelineData, centerLabel }) {
         return { label: "COMPLETE", className: "border-emerald-400/40 bg-emerald-50 text-emerald-600" };
       case "in-progress":
         return { label: "ACTIVE", className: "border-amber-400/40 bg-amber-50 text-amber-600" };
+      case "error":
+        return { label: "ERROR", className: "border-red-400/40 bg-red-50 text-red-600" };
       default:
-        return { label: "PENDING", className: "border-border bg-secondary text-foreground/50" };
+        return { label: "IDLE", className: "border-border bg-secondary text-foreground/50" };
+    }
+  };
+
+  const getNodeStyle = (item) => {
+    const isHot = item.energy >= 90; // just completed — bright glow
+    switch (item.status) {
+      case "completed":
+        return isHot
+          ? { borderColor: "#10b981", boxShadow: `0 0 20px #10b98160, 0 0 40px ${item.color}30`, bg: `${item.color}40` }
+          : { borderColor: `${item.color}60`, boxShadow: `0 0 8px ${item.color}20`, bg: `${item.color}20` };
+      case "in-progress":
+        return { borderColor: item.color, boxShadow: `0 0 24px ${item.color}60, 0 0 48px ${item.color}25`, bg: `${item.color}45` };
+      case "error":
+        return { borderColor: "#ef4444", boxShadow: "0 0 16px rgba(239,68,68,0.4)", bg: "rgba(239,68,68,0.25)" };
+      default:
+        return { borderColor: "rgba(217,119,6,0.35)", boxShadow: "none", bg: "hsl(var(--card))" };
     }
   };
 
@@ -117,8 +135,8 @@ export default function RadialOrbitalTimeline({ timelineData, centerLabel }) {
         </div>
 
         {/* Orbit rings */}
-        <div className="absolute w-[420px] h-[420px] rounded-full border-2 border-amber-500/35" />
-        <div className="absolute w-[320px] h-[320px] rounded-full border border-amber-400/25" />
+        <div className="absolute w-[420px] h-[420px] rounded-full border-2 border-amber-500/50" />
+        <div className="absolute w-[320px] h-[320px] rounded-full border border-amber-400/35" />
 
         {/* Sweeper */}
         <div className="absolute w-[420px] h-[420px] pointer-events-none" style={{ animation: "orbit 16s linear infinite" }}>
@@ -133,6 +151,11 @@ export default function RadialOrbitalTimeline({ timelineData, centerLabel }) {
           const isPulsing = pulseEffect[item.id];
           const Icon = item.icon;
           const statusBadge = getStatusBadge(item.status);
+          const nodeStyle = getNodeStyle(item);
+          const isActive = item.status === "in-progress";
+          const isComplete = item.status === "completed";
+          const isHot = isComplete && item.energy >= 90;
+          const isError = item.status === "error";
 
           return (
             <div
@@ -149,46 +172,76 @@ export default function RadialOrbitalTimeline({ timelineData, centerLabel }) {
                 toggleItem(item.id);
               }}
             >
-              {/* Glow ring */}
-              {(isPulsing || isExpanded) && (
+              {/* Glow ring — active bees pulse, just-completed bees glow steady */}
+              {(isPulsing || isExpanded || isActive || isHot) && (
                 <div
-                  className="absolute rounded-full animate-pulse"
+                  className={`absolute rounded-full ${isActive ? "animate-ping" : "animate-pulse"}`}
                   style={{
-                    background: `radial-gradient(circle, ${item.color}20 0%, transparent 70%)`,
-                    width: "64px", height: "64px",
-                    left: "-8px", top: "-8px",
+                    background: isActive
+                      ? `radial-gradient(circle, ${item.color}35 0%, ${item.color}10 50%, transparent 70%)`
+                      : `radial-gradient(circle, ${item.color}20 0%, transparent 70%)`,
+                    width: isActive ? "80px" : "64px",
+                    height: isActive ? "80px" : "64px",
+                    left: isActive ? "-16px" : "-8px",
+                    top: isActive ? "-16px" : "-8px",
                   }}
                 />
               )}
 
-              {/* Node - with bee emoji + icon combo */}
+              {/* Active bee gets a second ring */}
+              {isActive && (
+                <div
+                  className="absolute rounded-full animate-pulse"
+                  style={{
+                    background: `radial-gradient(circle, ${item.color}15 0%, transparent 70%)`,
+                    width: "96px", height: "96px",
+                    left: "-24px", top: "-24px",
+                  }}
+                />
+              )}
+
+              {/* Node */}
               <div
                 className={`
                   w-14 h-14 rounded-xl flex items-center justify-center relative
                   border-2 transition-all duration-300
                   ${isExpanded
-                    ? "border-amber-500 shadow-lg shadow-amber-500/20 scale-110"
+                    ? "scale-110"
+                    : isActive
+                    ? "scale-110 animate-pulse"
                     : isRelated
-                    ? "border-amber-400/60 animate-pulse"
-                    : "border-amber-300/30 hover:border-amber-400/50"
+                    ? "animate-pulse"
+                    : "hover:border-amber-400/50"
                   }
                 `}
                 style={{
+                  borderColor: isExpanded ? "#f59e0b" : nodeStyle.borderColor,
+                  boxShadow: isExpanded ? `0 0 20px ${item.color}30` : nodeStyle.boxShadow,
                   background: isExpanded
                     ? `${item.color}20`
                     : isRelated
                     ? `${item.color}10`
-                    : "hsl(var(--card))",
+                    : nodeStyle.bg,
                 }}
               >
-                <Icon size={22} style={{ color: item.color }} strokeWidth={2.5} />
-                <span className="absolute -top-2 -right-2 text-xs">🐝</span>
+                <Icon size={22} style={{ color: isError ? "#ef4444" : item.color, filter: "saturate(1.4) brightness(0.85)" }} strokeWidth={2.5} />
+                {/* Status indicator dot */}
+                <span className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
+                  isActive ? "bg-amber-500 animate-ping" :
+                  isHot ? "bg-emerald-500 animate-pulse" :
+                  isComplete ? "bg-emerald-400" :
+                  isError ? "bg-red-500" :
+                  "bg-gray-300"
+                }`} />
+                {isActive && (
+                  <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-500 border-2 border-white" />
+                )}
               </div>
 
               {/* Label */}
               <div
                 className={`absolute top-[64px] left-1/2 -translate-x-1/2 whitespace-nowrap text-sm font-bold tracking-wide transition-all duration-300 ${
-                  isExpanded ? "text-foreground" : "text-foreground/70"
+                  isExpanded ? "text-foreground" : isActive ? "text-foreground/90" : "text-foreground/80"
                 }`}
               >
                 {item.title}

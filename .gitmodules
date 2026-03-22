@@ -1,0 +1,3 @@
+[submodule "mcp-xrpl"]
+	path = mcp-xrpl
+	url = https://github.com/RomThpt/mcp-xrpl.git
