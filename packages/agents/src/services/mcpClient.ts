@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { emitEvent } from '../bridge/websocket.js';
+import { emitEvent } from '../bridge/server.js';
 import type { BeeName } from '../data/types.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -9,8 +9,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const mcpClients = new Map<BeeName, Client>();
 
+import { existsSync } from 'fs';
+
 function getMCPServerPath(): string {
-  return process.env.MCP_SERVER_PATH || path.resolve(__dirname, '../../../../mcp-xrpl');
+  // Check env first, then common relative paths
+  if (process.env.MCP_SERVER_PATH) return process.env.MCP_SERVER_PATH;
+
+  const candidates = [
+    path.resolve(__dirname, '../../../../mcp-xrpl'),           // sibling to bumblebee
+    path.resolve(__dirname, '../../../../mcp-xrpl/mcp-server'), // nested structure
+    path.resolve(__dirname, '../../../../../mcp-xrpl'),         // one level up
+  ];
+
+  for (const p of candidates) {
+    try {
+      if (existsSync(path.join(p, 'src', 'index.ts'))) return p;
+    } catch {}
+  }
+
+  return candidates[0]; // fallback to first candidate
 }
 
 export async function connectMCPForBee(bee: BeeName, walletSeed: string): Promise<boolean> {

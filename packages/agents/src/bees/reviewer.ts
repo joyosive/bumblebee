@@ -2,7 +2,7 @@
 import { getCampaign, getMilestones, updateCampaignStatus, createTrustScore } from '../db/database.js';
 import { calculateCampaignTrustScore, formatTrustScoreMessage } from '../services/trustScore.js';
 import { mcpSetOracle, mcpCreateCredential, isMCPConnected } from '../services/mcpClient.js';
-import { emitEvent } from '../bridge/websocket.js';
+import { emitEvent } from '../bridge/server.js';
 import type { Campaign, Milestone } from '../data/types.js';
 
 export async function completeCampaign(campaignId: string): Promise<string> {

@@ -1,5 +1,5 @@
 <p align="center">
-  <span style="font-size: 48px">🐝</span>
+  <img src="https://img.shields.io/badge/🐝-BumbleBee-f5c542?style=for-the-badge&labelColor=1a1a2e" alt="BumbleBee" />
 </p>
 
 <h1 align="center">BumbleBee</h1>
@@ -7,13 +7,16 @@
 <p align="center">
   <strong>Autonomous Impact Funding on XRPL</strong>
   <br />
-  <em>5 autonomous agents evaluate, fund, verify, and score NGO campaigns — all on-chain.</em>
+  <em>A swarm of 5 autonomous agents that evaluate, fund, verify, and score NGO campaigns — all on-chain.</em>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/XRPL-Testnet-blue?style=flat-square" alt="XRPL" />
   <img src="https://img.shields.io/badge/Agents-5%20Bees-f5c542?style=flat-square" alt="Bees" />
+  <img src="https://img.shields.io/badge/RLUSD-Enabled-0066ff?style=flat-square" alt="RLUSD" />
   <img src="https://img.shields.io/badge/MCP-Enabled-34d399?style=flat-square" alt="MCP" />
+  <img src="https://img.shields.io/badge/A2A-Discovery-8b5cf6?style=flat-square" alt="A2A" />
+  <img src="https://img.shields.io/badge/Track-Social%20Impact-ff6b6b?style=flat-square" alt="Social Impact" />
   <img src="https://img.shields.io/badge/License-MIT-white?style=flat-square" alt="License" />
 </p>
 
@@ -21,111 +24,174 @@
 
 ## The Problem
 
-Impact funding suffers from opacity. Donors send money and hope for the best. NGOs spend time on bureaucratic reporting instead of impact. There is no standardized way to verify outcomes, release funds conditionally, or build on-chain reputation.
+Billions flow into impact funding every year, yet the system is broken:
 
-## The Solution
+- **Donors** send money and hope for the best — no visibility, no accountability
+- **NGOs** burn time on bureaucratic reporting instead of delivering impact
+- **No standard** exists to verify outcomes, release funds conditionally, or build portable reputation
 
-**BumbleBee** is a swarm of 5 autonomous agents ("Bees") that manage the entire lifecycle of impact funding on the XRP Ledger. NGOs submit campaigns via Telegram, and the Bees take it from there — evaluating proposals, creating escrow contracts, verifying milestone evidence, and publishing trust scores. Donors monitor everything through a real-time dashboard.
+## What BumbleBee Does
 
-Every action is auditable. Every fund release is conditional. Every score lives on-chain.
+BumbleBee is a **multi-agent swarm** that automates the entire lifecycle of impact funding on the **XRP Ledger**. NGOs submit campaigns via Telegram. Five specialized agents — the Bees — take it from there.
 
-## How It Works
+Every fund release is **conditional** (crypto-conditions). Every action is **auditable** (per-agent wallets with DIDs). Every trust score is **on-chain** (XRPL Oracle).
 
 ```
   NGO submits via Telegram
            │
-     ┌─────▼─────┐
-     │ Facilitator │  ← Campaign intake & structuring
-     └─────┬─────┘
+     ┌─────▼──────┐
+     │ Facilitator  │  ← Intake & structuring via LLM
+     └─────┬──────┘
            │
-     ┌─────▼─────┐
-     │  Evaluator  │  ← Due diligence scoring (60+ to pass)
-     └─────┬─────┘
+     ┌─────▼──────┐
+     │  Evaluator   │  ← Due diligence scoring (60+ to pass)
+     └─────┬──────┘
            │
-     ┌─────▼─────┐
-     │  Treasury   │  ← Escrow creation & milestone payments
-     └─────┬─────┘
+     ┌─────▼──────┐
+     │  Treasury    │  ← XRPL escrow creation + milestone payments
+     └─────┬──────┘
            │
-     ┌─────▼─────┐
-     │  Verifier   │  ← Evidence review & milestone approval
-     └─────┬─────┘
+     ┌─────▼──────┐
+     │  Verifier    │  ← Evidence review & milestone approval
+     └─────┬──────┘
            │
-     ┌─────▼─────┐
-     │  Reviewer   │  ← Trust scoring & on-chain reputation
-     └───────────┘
+     ┌─────▼──────┐
+     │  Reviewer    │  ← Trust scoring & on-chain reputation
+     └────────────┘
            │
     Donor monitors via Dashboard
 ```
 
-### The 5 Bees
+## The 5 Bees
 
-| Bee | Role | What It Does |
-|-----|------|-------------|
-| **Facilitator** | Campaign Intake | Receives NGO proposals via Telegram, extracts structured data using LLM, creates campaign records |
-| **Evaluator** | Due Diligence | Scores campaigns on description quality, sector clarity, and funding reasonability. Generates 3 milestones |
-| **Treasury** | Escrow & Funds | Allocates funds from pool, creates XRPL escrow contracts with crypto-conditions, releases payments on approval |
-| **Verifier** | Evidence Review | Reviews submitted evidence (photos, documents), approves or rejects milestones with feedback |
+| Bee | Role | Key Action |
+|-----|------|-----------|
+| **Facilitator** | Campaign Intake | Receives proposals via Telegram, uses LLM to extract structured data, creates campaign records |
+| **Evaluator** | Due Diligence | LLM-powered scoring (problem clarity, feasibility, impact, sector alignment), generates tailored milestones |
+| **Treasury** | Escrow & Funds | Allocates pool funds, creates XRPL escrow contracts with PREIMAGE-SHA-256 conditions + RLUSD stablecoin payments |
+| **Verifier** | Evidence Review | LLM-powered evidence analysis — evaluates submitted photos/docs against milestone requirements |
 | **Reviewer** | Trust Scoring | Calculates trust scores (speed + quality + utilization), publishes via Oracle, issues credentials |
 
-### Campaign Lifecycle
+## Campaign Lifecycle
+
+```
+Submit ──► Evaluate ──► Fund ──► Execute ──► Verify ──► Score
+  │           │          │          │           │          │
+  │       Score 60+   3 escrows   NGO works   Evidence   Trust score
+  │       to pass     created     on M1-M3    reviewed   on-chain
+  │                   M1 auto-                            via Oracle
+  │                   released
+  └── Natural language or /campaign via Telegram
+```
 
 1. **Submit** — NGO describes their project via Telegram (natural language or `/campaign`)
-2. **Evaluate** — Evaluator Bee scores the proposal; 60+ threshold to proceed
-3. **Fund** — Treasury Bee creates 3 escrow contracts on XRPL, auto-releases M1 seed funding
-4. **Execute** — NGO works on milestones, submits evidence via Telegram
-5. **Verify** — Verifier Bee reviews evidence, approves/rejects with feedback
-6. **Score** — Reviewer Bee calculates trust score and publishes it on-chain via Oracle
+2. **Evaluate** — Evaluator scores the proposal; 60+ threshold to proceed, generates 3 milestones
+3. **Fund** — Treasury creates 3 escrow contracts on XRPL, auto-releases M1 as seed funding
+4. **Execute** — NGO works through milestones, submits evidence (photos, documents) via Telegram
+5. **Verify** — Verifier reviews evidence, approves or requests revisions
+6. **Score** — Reviewer calculates trust score and publishes on-chain via XRPL Oracle + Credentials
 
-Each milestone payment is gated by a **PREIMAGE-SHA-256 crypto-condition** — funds cannot be released without verified fulfillment.
+Each milestone payment is gated by a **PREIMAGE-SHA-256 crypto-condition** — funds cannot be released without cryptographic proof of fulfillment.
+
+## XRPL Integration
+
+BumbleBee uses **5 native XRPL features**:
+
+| Feature | Usage |
+|---------|-------|
+| **Escrow** | Conditional fund releases — each milestone gets its own escrow with a PREIMAGE-SHA-256 crypto-condition. Funds auto-refund after 7 days if unclaimed |
+| **RLUSD Payments** | Dual-currency support — alongside XRP escrow releases, RLUSD stablecoin payments are sent to NGOs, eliminating volatility risk for real-world aid |
+| **DIDs** | Each of the 5 Bees registers a Decentralized Identifier on-chain, enabling full auditability of which agent performed which action |
+| **Oracle** | Trust scores are published on-chain as Oracle data, queryable by any application — building portable NGO reputation |
+| **Credentials** | Campaign completion certificates issued on-chain by the Reviewer Bee |
+
+### Wallet Architecture
+
+**5 separate XRPL wallets** — one per Bee — each with its own registered DID:
+
+```
+Treasury    ── Holds pool funds, creates & releases escrows
+Facilitator ── Registers campaigns on-chain via MCP
+Evaluator   ── Records evaluation scores
+Verifier    ── Issues verification records
+Reviewer    ── Publishes trust scores via Oracle
+```
+
+## Trust Scoring
+
+Completed campaigns receive a trust score (0–100) based on three dimensions:
+
+| Dimension | Weight | Criteria |
+|-----------|--------|----------|
+| **Speed** | 35 pts | How quickly milestones were completed (≤3 days = max) |
+| **Quality** | 35 pts | First-time approval vs. revisions needed |
+| **Utilization** | 30 pts | Percentage of milestones completed |
+
+Trust scores are published on-chain via **XRPL Oracle** and can be queried by any application — building a portable, verifiable reputation layer for NGOs across the ecosystem.
 
 ## Architecture
 
 ```
 bumblebee/
 ├── apps/
-│   └── web/                  # Next.js 14 monitoring dashboard
-│       ├── app/              # App Router pages
-│       ├── components/ui/    # shadcn + custom components
-│       └── components/       # Dashboard-specific components
+│   └── web/                    # Next.js 14 monitoring dashboard
+│       ├── app/                # App Router (landing, dashboard)
+│       ├── components/         # UI + dashboard components
+│       └── hooks/              # Wallet management hooks
 ├── packages/
-│   └── agents/               # 5-Bee agent swarm
-│       ├── src/bees/         # Individual bee handlers
-│       ├── src/db/           # SQLite schema & queries
-│       ├── src/services/     # XRPL, MCP, escrow, trust scoring
-│       └── src/bridge/       # WebSocket bridge to dashboard
-├── turbo.json
-└── pnpm-workspace.yaml
+│   └── agents/                 # 5-Bee agent swarm
+│       ├── src/bees/           # Individual bee handlers (5 agents)
+│       ├── src/db/             # SQLite schema & queries (6 tables)
+│       ├── src/services/       # XRPL, MCP, escrow, trust scoring
+│       ├── src/bridge/         # WebSocket bridge to dashboard
+│       └── src/a2a/            # Agent-to-Agent discovery cards
+├── turbo.json                  # Turborepo build orchestration
+└── pnpm-workspace.yaml         # Monorepo workspace config
+```
+
+### Data Model
+
+```
+campaigns ──┬── milestones (3 per campaign)
+             ├── escrows (1 per milestone, PREIMAGE-SHA-256)
+             ├── fund_allocations
+             └── trust_scores (Oracle + Credentials tx hashes)
 ```
 
 ## Tech Stack
 
-### Agent Swarm
-- **Telegraf** — Telegram bot framework for NGO interface
-- **Gemini 2.0 Flash** — LLM for natural language understanding & data extraction
-- **Groq** — Fallback LLM (free tier, fast)
-- **xrpl.js** — Direct XRPL ledger interaction
-- **MCP SDK** — Model Context Protocol for DIDs, Oracles, Credentials
-- **five-bells-condition** — RFC crypto-conditions for escrow gates
-- **SQLite** — Persistent state (campaigns, milestones, escrows, trust scores)
-- **ElizaOS** — Agent framework foundation
+### Agent Swarm (`packages/agents`)
 
-### Monitoring Dashboard
-- **Next.js 14** — React framework with App Router
-- **Tailwind CSS** — Utility-first styling with custom dark theme
-- **Framer Motion** — Smooth animations and transitions
-- **Lucide React** — Consistent iconography
-- **WebSocket** — Real-time event streaming from agent swarm
-- **shadcn/ui** — Component primitives (New York style)
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Bot Framework** | Telegraf | Telegram interface for NGO interactions |
+| **LLM** | Groq (Llama 3.3 70B) + Gemini 2.0 Flash | AI-powered evaluation, evidence verification, and campaign parsing (automatic failover) |
+| **Ledger** | xrpl.js 4.6 | Direct XRPL interaction (escrow, payments, queries) |
+| **Agent Protocol** | MCP SDK | Model Context Protocol for DIDs, Oracles, Credentials |
+| **Crypto** | five-bells-condition | RFC PREIMAGE-SHA-256 conditions for escrow gates |
+| **Database** | SQLite (better-sqlite3) | Persistent state for campaigns, milestones, escrows |
+| **Agent Framework** | ElizaOS | Foundation for agent lifecycle management |
+| **Real-time** | ws (WebSocket) | Event streaming to monitoring dashboard |
 
-### XRPL Features Used
-- **Escrow** — Conditional fund releases with crypto-conditions
-- **DIDs** — Per-bee decentralized identifiers for auditability
-- **Oracle** — On-chain trust score publication
-- **Credentials** — Campaign completion certificates
+### Monitoring Dashboard (`apps/web`)
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Framework** | Next.js 14 | React with App Router |
+| **Styling** | Tailwind CSS | Utility-first with custom dark theme |
+| **Animation** | Framer Motion | Smooth transitions and orbital bee visualizations |
+| **Wallet** | xrpl-connect | Multi-wallet support (Xaman, Crossmark, GemWallet, WalletConnect) |
+| **Icons** | Lucide React | Consistent iconography |
+| **Components** | shadcn/ui | Radix-based primitives |
+| **3D** | Spline | Interactive globe visualization |
 
 ### Infrastructure
-- **Turborepo** — Monorepo build orchestration
-- **pnpm** — Fast, disk-efficient package manager
+
+| Tool | Purpose |
+|------|---------|
+| **Turborepo** | Monorepo build orchestration with caching |
+| **pnpm** | Fast, disk-efficient package management |
+| **TypeScript** | Type-safe agent code (ES2022 target) |
 
 ## Quick Start
 
@@ -133,6 +199,8 @@ bumblebee/
 
 - Node.js 18+
 - pnpm 8+
+- Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- Google Gemini API key
 
 ### Installation
 
@@ -146,21 +214,37 @@ pnpm install
 
 ```bash
 cp packages/agents/.env.example packages/agents/.env
+cp apps/web/.env.example apps/web/.env.local
 ```
 
-Configure the following in `packages/agents/.env`:
+Configure `packages/agents/.env`:
 
 ```env
+# XRPL
+XRPL_NETWORK=testnet
+XRPL_WSS=wss://s.altnet.rippletest.net:51233
+
+# Wallets (fund from https://faucet.altnet.rippletest.net)
+TREASURY_WALLET_SEED=your_treasury_seed
+FACILITATOR_WALLET_SEED=your_facilitator_seed
+EVALUATOR_WALLET_SEED=your_evaluator_seed
+VERIFIER_WALLET_SEED=your_verifier_seed
+REVIEWER_WALLET_SEED=your_reviewer_seed
+
 # Telegram
 TELEGRAM_BOT_TOKEN=your_bot_token
 
-# LLM
-GOOGLE_API_KEY=your_gemini_key
-GROQ_API_KEY=your_groq_key          # optional fallback
+# LLM (Groq is primary — free tier, Gemini is fallback)
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=llama-3.3-70b-versatile
+GOOGLE_API_KEYS=key1,key2
+GOOGLE_MODEL=gemini-2.0-flash
 
-# Network
-XRPL_NETWORK=testnet
-XRPL_WSS=wss://s.altnet.rippletest.net:51233
+# RLUSD (optional — enables dual-currency XRP + stablecoin)
+RLUSD_ISSUER=rlusd_issuer_address
+
+# Dashboard Bridge
+DASHBOARD_WS_URL=ws://localhost:3001
 ```
 
 ### Run
@@ -173,7 +257,8 @@ pnpm --filter web dev
 pnpm --filter impactbee-agents dev
 ```
 
-Dashboard: [http://localhost:3000](http://localhost:3000)
+- Dashboard: [http://localhost:3000](http://localhost:3000)
+- A2A Discovery: [http://localhost:3002/.well-known/agent.json](http://localhost:3002/.well-known/agent.json)
 
 ### Telegram Commands
 
@@ -186,47 +271,46 @@ Dashboard: [http://localhost:3000](http://localhost:3000)
 | `/pool` | Check treasury balance |
 | `/help` | List all commands |
 
-NGOs can also just type naturally — the Facilitator Bee uses LLM intent detection to understand what you need.
+NGOs can also type naturally — the Facilitator Bee uses intent detection to understand what you need.
 
-## Wallet Architecture
+## Demo Script (5 minutes)
 
-BumbleBee uses **5 separate XRPL wallets** — one per Bee. Each wallet has its own DID registered on-chain, providing full auditability of which agent performed which action.
+1. **Open Dashboard** — Show the monitoring interface at `localhost:3000`. Connect wallet. Point out the 5 bee statuses and empty campaign list.
 
-```
-Treasury  ── Holds pool funds, creates escrows
-Facilitator ── Registers campaigns on-chain
-Evaluator ── Records evaluation scores
-Verifier ── Issues verification records
-Reviewer ── Publishes trust scores via Oracle
-```
+2. **Submit Campaign** — In Telegram, type `/campaign` then describe an NGO project:
+   > "Clean Water Kenya is a non-profit providing clean water access in rural Kenya. We need 5 XRP to install 3 water filtration systems in Mombasa county. Sector: WASH, Country: Kenya."
 
-## Trust Scoring
+3. **Watch the Bees** — Dashboard updates in real-time:
+   - **FacilitatorBee** parses the campaign (LLM extraction)
+   - **EvaluatorBee** scores it (LLM-powered: problem clarity, feasibility, impact, sector)
+   - **TreasuryBee** creates 3 escrow contracts on XRPL + RLUSD payments if enabled
+   - Click the explorer links to show the escrow transactions on `testnet.xrpl.org`
 
-Campaigns that reach completion receive a trust score (0–100) based on three dimensions:
+4. **Submit Evidence** — Type `/submit 2`, then send a photo. The **VerifierBee** analyzes the evidence using LLM and either approves or requests revisions. Show the confidence score and reasoning.
 
-| Dimension | Weight | Criteria |
-|-----------|--------|----------|
-| **Speed** | 35 pts | How quickly milestones were completed |
-| **Quality** | 35 pts | First-time approval vs. revisions needed |
-| **Utilization** | 30 pts | Percentage of milestones completed |
+5. **Campaign Complete** — After all milestones, the **ReviewerBee** calculates a trust score and publishes it on-chain via Oracle. Show the trust score breakdown on the dashboard.
 
-Trust scores are published on-chain via **XRPL Oracle** and can be queried by any application — building a portable, verifiable reputation for NGOs.
+**Key talking points:**
+- "Funds release ONLY when milestones are verified — crypto-conditions, not trust"
+- "RLUSD eliminates volatility — NGOs receive stablecoins for real-world spending"
+- "Every action is auditable — 5 separate wallets with DIDs on XRPL"
+- "Telegram-first — accessible to NGOs with just a phone"
 
 ## Development
 
 ```bash
-pnpm dev          # Start all packages
+pnpm dev          # Start all packages in dev mode
 pnpm build        # Build all packages
 pnpm lint         # Lint all packages
 pnpm format       # Format with Prettier
 pnpm clean        # Clean build artifacts
 ```
 
-## Networks
+## Network
 
 | Network | WebSocket | Explorer |
 |---------|-----------|----------|
-| Testnet | `wss://s.altnet.rippletest.net:51233` | [testnet.xrpl.org](https://testnet.xrpl.org) |
+| XRPL Testnet | `wss://s.altnet.rippletest.net:51233` | [testnet.xrpl.org](https://testnet.xrpl.org) |
 
 ## License
 
@@ -235,5 +319,5 @@ MIT
 ---
 
 <p align="center">
-  Built by <a href="https://github.com/joyosive">joyosive</a> for EPFL Social Impact
+  Built by <a href="https://github.com/joyosive">joyosive</a> at EPFL
 </p>

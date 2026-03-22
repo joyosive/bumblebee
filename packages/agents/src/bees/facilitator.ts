@@ -1,6 +1,6 @@
 // packages/agents/src/bees/facilitator.ts
 import { createCampaign, getCampaignsByNgo, getMilestones, getMilestone, updateMilestone } from '../db/database.js';
-import { emitEvent } from '../bridge/websocket.js';
+import { emitEvent } from '../bridge/server.js';
 import type { Campaign, Milestone } from '../data/types.js';
 
 const SYSTEM_PROMPT = `You are FacilitatorBee, part of the BumbleBee swarm. You help NGOs submit funding campaigns. Extract these details from the conversation:

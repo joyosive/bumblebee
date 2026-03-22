@@ -1,7 +1,67 @@
 // packages/agents/src/bees/verifier.ts
 import { getMilestone, updateMilestone, getMilestones, updateCampaignStatus, getCampaign } from '../db/database.js';
-import { emitEvent } from '../bridge/websocket.js';
+import { emitEvent } from '../bridge/server.js';
 import type { Campaign, Milestone } from '../data/types.js';
+
+// ── LLM Evidence Verification ─────────────────────────────────────
+
+const VERIFY_SYSTEM_PROMPT = `You are VerifierBee, an AI agent that reviews evidence submitted by NGOs for milestone completion in social impact campaigns funded on XRPL.
+
+You must evaluate whether the submitted evidence is sufficient to prove the milestone was completed. Consider:
+1. Does the evidence type match what's expected? (photos of construction, receipts, reports, etc.)
+2. Is the evidence count reasonable for the milestone scope?
+3. Does the description of what was submitted align with the milestone requirements?
+
+Respond with EXACTLY this JSON format:
+VERDICT:{"approved":true|false,"confidence":0-100,"reasoning":"one sentence explanation","feedback":"actionable feedback if rejected, empty string if approved"}
+
+Be fair but rigorous. Approve if evidence is reasonable. Reject only if clearly insufficient or mismatched.`;
+
+export async function verifyEvidenceWithLLM(
+  campaign: Campaign,
+  milestone: Milestone,
+  fileCount: number,
+  askLLM: (system: string, user: string) => Promise<string | null>,
+): Promise<{ approved: boolean; confidence: number; reasoning: string; feedback: string }> {
+  emitEvent({ agent: 'verifier', type: 'work', message: `Analyzing evidence for M${milestone.number}: "${milestone.title}"`, timestamp: Date.now() });
+
+  const userPrompt = `Campaign: "${campaign.title}" (${campaign.sector}, ${campaign.country})
+Campaign goal: ${campaign.funding_goal} XRP
+Milestone ${milestone.number}: "${milestone.title}"
+Milestone description: "${milestone.description}"
+Evidence submitted: ${fileCount} file(s) (photos/documents uploaded via Telegram)
+Submission time: ${milestone.submitted_at || 'just now'}
+
+Evaluate whether ${fileCount} evidence file(s) is sufficient for this milestone. Consider that for "${milestone.title}" in the ${campaign.sector} sector, typical evidence would include relevant photos, receipts, or reports.`;
+
+  try {
+    const response = await askLLM(VERIFY_SYSTEM_PROMPT, userPrompt);
+    if (response) {
+      const match = response.match(/VERDICT:(\{.*\})/);
+      if (match) {
+        const verdict = JSON.parse(match[1]);
+        emitEvent({
+          agent: 'verifier', type: 'work',
+          message: `LLM verdict for M${milestone.number}: ${verdict.approved ? 'APPROVED' : 'NEEDS REVISION'} (${verdict.confidence}% confidence)`,
+          timestamp: Date.now(),
+        });
+        return verdict;
+      }
+    }
+  } catch (err: any) {
+    console.log(`[VERIFIER] LLM analysis failed: ${err.message?.slice(0, 60)}`);
+  }
+
+  // Fallback: approve if evidence exists (graceful degradation)
+  return {
+    approved: fileCount > 0,
+    confidence: 60,
+    reasoning: fileCount > 0 ? 'Evidence files submitted (LLM unavailable, basic check passed)' : 'No evidence files found',
+    feedback: fileCount > 0 ? '' : 'Please attach at least one photo or document as evidence.',
+  };
+}
+
+// ── Core Functions ────────────────────────────────────────────────
 
 export function reviewEvidence(campaignId: string, milestoneNum: number): {
   hasEvidence: boolean;

@@ -1,14 +1,77 @@
 // packages/agents/src/bees/treasury.ts
 import { createEscrow, finishEscrow, cancelEscrow } from '../services/escrow.js';
 import { generateConditionPair } from '../services/cryptoCondition.js';
-import { getWallet, getExplorerUrl, getAccountInfo } from '../services/xrplClient.js';
+import { getWallet, getExplorerUrl, getAccountInfo, isRLUSDEnabled, sendRLUSD, getRLUSDIssuer, getRLUSDBalance, createTrustLine } from '../services/xrplClient.js';
 import { createEscrowRecord, updateEscrowStatus, getEscrow, getActiveEscrows, createAllocation, updateCampaignStatus, getCampaign, getMilestones, updateMilestone } from '../db/database.js';
 import type { Milestone } from '../data/types.js';
-import { emitEvent } from '../bridge/websocket.js';
+import { emitEvent } from '../bridge/server.js';
 import type { Campaign, EscrowRecord } from '../data/types.js';
 
 const TREASURY_SEED = () => process.env.TREASURY_WALLET_SEED!;
 const NGO_SEED = () => process.env.NGO_WALLET_SEED!;
+
+// ── RLUSD TrustLine Setup ──────────────────────────────────────────
+
+let rlusdTrustlineReady = false;
+
+export async function ensureRLUSDTrustlines(): Promise<boolean> {
+  if (rlusdTrustlineReady || !isRLUSDEnabled()) return rlusdTrustlineReady;
+
+  const issuer = getRLUSDIssuer();
+  try {
+    // Treasury needs a trustline to hold RLUSD
+    await createTrustLine(TREASURY_SEED(), issuer);
+    console.log('   RLUSD: Treasury trustline set');
+  } catch (err: any) {
+    // May already exist — that's fine
+    if (!err.message?.includes('tecNO_LINE_INSUF_RESERVE')) {
+      console.log(`   RLUSD: Treasury trustline: ${err.message?.slice(0, 50)}`);
+    }
+  }
+
+  try {
+    // NGO needs a trustline to receive RLUSD
+    await createTrustLine(NGO_SEED(), issuer);
+    console.log('   RLUSD: NGO trustline set');
+  } catch (err: any) {
+    if (!err.message?.includes('tecNO_LINE_INSUF_RESERVE')) {
+      console.log(`   RLUSD: NGO trustline: ${err.message?.slice(0, 50)}`);
+    }
+  }
+
+  rlusdTrustlineReady = true;
+  return true;
+}
+
+/**
+ * Send RLUSD equivalent alongside XRP escrow release.
+ * Amount is derived from XRP drops using a simple 1 XRP = 0.50 USD rate for testnet demo.
+ */
+async function sendRLUSDPayment(destinationSeed: string, amountDrops: string, milestoneNum: number): Promise<string> {
+  if (!isRLUSDEnabled()) return '';
+
+  try {
+    await ensureRLUSDTrustlines();
+    const xrpAmount = parseInt(amountDrops) / 1_000_000;
+    // Demo rate: 1 XRP ≈ $0.50 USD (configurable)
+    const usdAmount = (xrpAmount * 0.5).toFixed(2);
+
+    const ngoWallet = getWallet(NGO_SEED());
+    const result = await sendRLUSD(TREASURY_SEED(), ngoWallet.address, usdAmount);
+
+    emitEvent({
+      agent: 'treasury', type: 'work',
+      message: `RLUSD payment: $${usdAmount} sent for M${milestoneNum}`,
+      data: { txHash: result.txHash, currency: 'RLUSD', amount: usdAmount },
+      timestamp: Date.now(),
+    });
+
+    return `\nRLUSD: $${usdAmount} sent | ${getExplorerUrl(result.txHash)}`;
+  } catch (err: any) {
+    console.log(`[TREASURY] RLUSD payment failed: ${err.message?.slice(0, 60)}`);
+    return '';
+  }
+}
 
 export async function allocateAndCreateEscrows(campaignId: string): Promise<string> {
   const campaign = getCampaign(campaignId) as Campaign | undefined;
@@ -98,6 +161,9 @@ export async function allocateAndCreateEscrows(campaignId: string): Promise<stri
       if (m1) updateMilestone(m1.id, { status: 'completed', approved_at: new Date().toISOString() });
       if (m2) updateMilestone(m2.id, { status: 'active' });
       m1ReleaseMsg = `\nM1 released: ${(amounts[0] / 1_000_000).toFixed(2)} XRP sent to NGO | ${getExplorerUrl(releaseResult.txHash)}`;
+      // Also send RLUSD if enabled
+      const rlusdMsg = await sendRLUSDPayment(NGO_SEED(), amounts[0].toString(), 1);
+      m1ReleaseMsg += rlusdMsg;
     } catch (err: any) {
       m1ReleaseMsg = `\nM1 release failed: ${err.message}`;
     }
@@ -105,7 +171,9 @@ export async function allocateAndCreateEscrows(campaignId: string): Promise<stri
 
   emitEvent({ agent: 'treasury', type: 'complete', message: `Funded: ${campaign.title}`, timestamp: Date.now() });
 
-  return `[TreasuryBee] Funded. 3 milestone escrows created:\n\n${results.join('\n')}${m1ReleaseMsg}\n\nM1 funds released. Start working, send "done" or /submit 2 when M2 is ready.`;
+  const currencyNote = isRLUSDEnabled() ? '\n\nDual-currency: XRP escrow + RLUSD stablecoin payments enabled.' : '';
+
+  return `[TreasuryBee] Funded. 3 milestone escrows created:\n\n${results.join('\n')}${m1ReleaseMsg}${currencyNote}\n\nM1 funds released. Start working, send "done" or /submit 2 when M2 is ready.`;
 }
 
 export async function releaseMilestoneEscrow(campaignId: string, milestoneNumber: number): Promise<string> {
@@ -132,7 +200,10 @@ export async function releaseMilestoneEscrow(campaignId: string, milestoneNumber
       timestamp: Date.now(),
     });
 
-    return `[TreasuryBee] Milestone ${milestoneNumber} payment released. ${(parseInt(escrow.amount) / 1_000_000).toFixed(2)} XRP sent to NGO.\n${getExplorerUrl(result.txHash)}`;
+    // Also send RLUSD if enabled
+    const rlusdMsg = await sendRLUSDPayment(NGO_SEED(), escrow.amount, milestoneNumber);
+
+    return `[TreasuryBee] Milestone ${milestoneNumber} payment released. ${(parseInt(escrow.amount) / 1_000_000).toFixed(2)} XRP sent to NGO.\n${getExplorerUrl(result.txHash)}${rlusdMsg}`;
   } catch (err: any) {
     return `Release failed: ${err.message}`;
   }
@@ -166,5 +237,11 @@ export async function getPoolStatus(): Promise<string> {
   const balanceXRP = parseInt(accountInfo.Balance) / 1_000_000;
   const available = balanceXRP - 10; // base reserve
 
-  return `[TreasuryBee] Pool Status\nAddress: ${treasuryWallet.address}\nBalance: ${balanceXRP.toFixed(2)} XRP\nAvailable: ${available.toFixed(2)} XRP (after 10 XRP base reserve)`;
+  let rlusdLine = '';
+  if (isRLUSDEnabled()) {
+    const rlusdBalance = await getRLUSDBalance(treasuryWallet.address);
+    rlusdLine = `\nRLUSD: $${rlusdBalance}`;
+  }
+
+  return `[TreasuryBee] Pool Status\nAddress: ${treasuryWallet.address}\nBalance: ${balanceXRP.toFixed(2)} XRP${rlusdLine}\nAvailable: ${available.toFixed(2)} XRP (after 10 XRP base reserve)`;
 }

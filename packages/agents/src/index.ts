@@ -11,16 +11,16 @@ import { message } from 'telegraf/filters';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 import { initDB } from './db/database.js';
-import { initBridge, emitEvent } from './bridge/websocket.js';
+import { initBridgeServer, emitEvent } from './bridge/server.js';
 import { initAllMCP, mcpCreateDID, isMCPConnected } from './services/mcpClient.js';
 import { startA2AServer } from './a2a/agentCards.js';
 
 import { getFacilitatorSystemPrompt, parseCampaignFromGemini, handleCampaignCreate, handleSubmitEvidence, handleMyStatus } from './bees/facilitator.js';
 import { evaluateCampaign } from './bees/evaluator.js';
-import { allocateAndCreateEscrows, releaseMilestoneEscrow, cancelCampaignEscrows, getPoolStatus } from './bees/treasury.js';
-import { reviewEvidence, approveMilestone } from './bees/verifier.js';
+import { allocateAndCreateEscrows, releaseMilestoneEscrow, cancelCampaignEscrows, getPoolStatus, ensureRLUSDTrustlines } from './bees/treasury.js';
+import { reviewEvidence, approveMilestone, rejectMilestone, verifyEvidenceWithLLM } from './bees/verifier.js';
 import { completeCampaign } from './bees/reviewer.js';
-import { getCampaignsByNgo, getCampaignsByStatus, getMilestones, updateMilestone } from './db/database.js';
+import { getCampaignsByNgo, getCampaignsByStatus, getMilestones, getMilestone, updateMilestone } from './db/database.js';
 import type { Campaign, Milestone, BeeName } from './data/types.js';
 
 // ── LLM (Groq primary, Gemini fallback) ─────────────────────────────
@@ -105,7 +105,7 @@ async function main() {
   console.log('   DB: SQLite initialized');
 
   // 2. Infrastructure
-  initBridge();
+  initBridgeServer();
   startA2AServer();
 
   // 3. MCP (multi-wallet)
@@ -124,6 +124,15 @@ async function main() {
         }
       }
     }
+  }
+
+  // 4b. RLUSD TrustLines (if configured)
+  if (process.env.RLUSD_ISSUER) {
+    ensureRLUSDTrustlines().then(ok => {
+      console.log(`   RLUSD: ${ok ? 'Trustlines ready' : 'Not configured'}`);
+    }).catch(() => {
+      console.log('   RLUSD: Setup skipped (issuer not available)');
+    });
   }
 
   // 5. Telegram bot
@@ -178,7 +187,7 @@ async function main() {
     const milestoneNum = parseInt(args[1]);
 
     if (!milestoneNum || milestoneNum < 1 || milestoneNum > 3) {
-      ctx.reply('Usage: /submit <milestone_number>\nExample: /submit 1\n\nAttach photos or documents with the command.');
+      ctx.reply('Usage: /submit <milestone_number>\nExample: /submit 2\n\nThen attach photos or documents in the next message.');
       return;
     }
 
@@ -191,8 +200,23 @@ async function main() {
       return;
     }
 
+    // Check milestone status before setting state
+    const milestone = getMilestone(activeCampaign.id, milestoneNum) as Milestone | undefined;
+    if (!milestone) {
+      ctx.reply(`Milestone ${milestoneNum} not found.`);
+      return;
+    }
+    if (milestone.status === 'completed') {
+      ctx.reply(`Milestone ${milestoneNum} ("${milestone.title}") is already completed.`);
+      return;
+    }
+    if (milestone.status === 'pending') {
+      ctx.reply(`Milestone ${milestoneNum} ("${milestone.title}") isn't active yet. Complete the earlier milestones first.`);
+      return;
+    }
+
     userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: milestoneNum.toString() });
-    ctx.reply(`Send your evidence for milestone ${milestoneNum} now. Attach photos, invoices, or documents.`);
+    ctx.reply(`Send your evidence for milestone ${milestoneNum} ("${milestone.title}") now.\nAttach photos, invoices, or documents.`);
   });
 
   // ── File/Photo handler ─────────────────────────────────
@@ -209,37 +233,116 @@ async function main() {
       ctx.reply(result.message);
 
       if (result.milestone) {
-        // Auto-trigger VerifierBee review
+        // Trigger VerifierBee LLM review
         const review = reviewEvidence(state.campaignId, milestoneNum);
-        if (review.hasEvidence) {
-          // Auto-approve for demo (in production, VerifierBee would do real review via Gemini)
-          const approveResult = approveMilestone(state.campaignId, milestoneNum);
+        if (review.hasEvidence && review.campaign && review.milestone) {
+          const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+          ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
 
-          if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
-            // Release escrow
-            const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(releaseMsg);
+          if (verdict.approved) {
+            const approveResult = approveMilestone(state.campaignId, milestoneNum);
 
-            // All milestones done — trigger ReviewerBee
-            const completionMsg = await completeCampaign(state.campaignId);
-            ctx.reply(completionMsg);
+            if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(releaseMsg);
+              const completionMsg = await completeCampaign(state.campaignId);
+              ctx.reply(completionMsg);
+            } else {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            }
           } else {
-            // Release this milestone's escrow
-            const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
+            ctx.reply(`[VerifierBee] ${rejectResult}`);
           }
         }
       }
 
       userState.delete(userId);
     } else {
+      // Auto-detect /submit N in caption or find active milestone
+      const caption = (ctx.message as any).caption || '';
+      const captionMatch = caption.match(/\/submit\s+(\d)/);
+      const campaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+
+      if (activeCampaign) {
+        let milestoneNum: number | null = null;
+        if (captionMatch) {
+          milestoneNum = parseInt(captionMatch[1]);
+        } else {
+          // Auto-detect: find the active or revision_needed milestone
+          const milestones = getMilestones(activeCampaign.id) as Milestone[];
+          const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
+          if (active) milestoneNum = active.number;
+        }
+
+        if (milestoneNum) {
+          const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+          userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: milestoneNum.toString() });
+          // Re-trigger by emitting to self — simpler: just inline the evidence flow
+          const result = handleSubmitEvidence(activeCampaign.id, milestoneNum, [fileId]);
+          ctx.reply(result.message);
+          if (result.milestone) {
+            const review = reviewEvidence(activeCampaign.id, milestoneNum);
+            if (review.hasEvidence && review.campaign && review.milestone) {
+              const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+              ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
+              if (verdict.approved) {
+                const approveResult = approveMilestone(activeCampaign.id, milestoneNum);
+                if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
+                  ctx.reply(releaseMsg);
+                  const completionMsg = await completeCampaign(activeCampaign.id);
+                  ctx.reply(completionMsg);
+                } else {
+                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
+                  ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+                }
+              } else {
+                const rejectResult = rejectMilestone(activeCampaign.id, milestoneNum, verdict.feedback);
+                ctx.reply(`[VerifierBee] ${rejectResult}`);
+              }
+            }
+          }
+          userState.delete(userId);
+          return;
+        }
+      }
       ctx.reply('Got a photo. To submit evidence, use /submit <milestone_number> first, then attach files.');
     }
   });
 
   bot.on(message('document'), async (ctx) => {
     const userId = ctx.from.id.toString();
-    const state = userState.get(userId);
+    let state = userState.get(userId);
+
+    // Auto-detect /submit N in document caption
+    if (!state?.mode && ctx.message.caption) {
+      const captionMatch = ctx.message.caption.match(/\/submit\s+(\d)/);
+      if (captionMatch) {
+        const campaigns = getCampaignsByNgo(userId) as Campaign[];
+        const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+        if (activeCampaign) {
+          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: captionMatch[1] };
+          userState.set(userId, state);
+        }
+      }
+    }
+
+    // If still no state, auto-detect active milestone
+    if (!state?.mode) {
+      const campaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+      if (activeCampaign) {
+        const milestones = getMilestones(activeCampaign.id) as Milestone[];
+        const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
+        if (active) {
+          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: active.number.toString() };
+          userState.set(userId, state);
+        }
+      }
+    }
 
     if (state?.mode === 'awaiting_evidence' && state.campaignId && state.context) {
       const fileId = ctx.message.document.file_id;
@@ -250,17 +353,25 @@ async function main() {
 
       if (result.milestone) {
         const review = reviewEvidence(state.campaignId, milestoneNum);
-        if (review.hasEvidence) {
-          const approveResult = approveMilestone(state.campaignId, milestoneNum);
+        if (review.hasEvidence && review.campaign && review.milestone) {
+          const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+          ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
 
-          if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
-            const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(releaseMsg);
-            const completionMsg = await completeCampaign(state.campaignId);
-            ctx.reply(completionMsg);
+          if (verdict.approved) {
+            const approveResult = approveMilestone(state.campaignId, milestoneNum);
+
+            if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(releaseMsg);
+              const completionMsg = await completeCampaign(state.campaignId);
+              ctx.reply(completionMsg);
+            } else {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            }
           } else {
-            const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
-            ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
+            ctx.reply(`[VerifierBee] ${rejectResult}`);
           }
         }
       }
@@ -337,7 +448,7 @@ async function main() {
         const result = handleCampaignCreate(campaignData, userId);
         userState.delete(userId);
 
-        const evalResult = evaluateCampaign(result.campaignId);
+        const evalResult = await evaluateCampaign(result.campaignId, askLLM);
         ctx.reply(result.message);
 
         if (evalResult.approved) {
@@ -407,6 +518,7 @@ async function main() {
 
   console.log(`\n BumbleBee is live!`);
   console.log(`   MCP: ${mcpReady ? 'Connected' : 'Not available (using direct xrpl.js)'}`);
+  console.log(`   RLUSD: ${process.env.RLUSD_ISSUER ? 'Enabled (dual-currency)' : 'XRP only'}`);
   console.log(`   A2A: http://localhost:3002/.well-known/agent.json\n`);
 
   // 7. Milestone deadline checker (runs every hour)
