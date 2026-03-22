@@ -317,7 +317,3 @@ pnpm clean        # Clean build artifacts
 MIT
 
 ---
-
-<p align="center">
-  Built by <a href="https://github.com/joyosive">joyosive</a> at EPFL
-</p>
