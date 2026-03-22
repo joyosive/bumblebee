@@ -24,6 +24,8 @@ build
 .DS_Store
 *.pem
 package-lock.json
+bun.lock
+bun.lockb
 
 # IDE
 .idea/
@@ -44,6 +46,12 @@ pnpm-debug.log*
 # SQLite
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
+
+# Superpowers docs (local only)
+docs/superpowers/
+.superpowers/
 
 # Vercel
 .vercel

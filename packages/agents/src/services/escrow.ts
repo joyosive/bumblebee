@@ -60,3 +60,23 @@ export async function finishEscrow(
 
   return { txHash };
 }
+
+export async function cancelEscrow(
+  walletSeed: string,
+  ownerAddress: string,
+  offerSequence: number,
+): Promise<{ txHash: string }> {
+  const xrpl = await getXrplClient();
+  const wallet = getWallet(walletSeed);
+
+  const prepared = await xrpl.autofill({
+    TransactionType: 'EscrowCancel',
+    Account: wallet.address,
+    Owner: ownerAddress,
+    OfferSequence: offerSequence,
+  });
+
+  const tx = await xrpl.submitAndWait(prepared, { wallet });
+  const txHash = typeof tx.result.hash === 'string' ? tx.result.hash : '';
+  return { txHash };
+}

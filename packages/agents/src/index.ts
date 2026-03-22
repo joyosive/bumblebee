@@ -1,13 +1,4 @@
-/**
- * BumbleBee — Autonomous Social Impact Funding on XRPL
- *
- * Three-agent swarm:
- *   BeeScout   — discovers ventures via Telegram
- *   BeeAnalyst — verifies on-chain (Oracle, Credentials, DID via MCP)
- *   BeeFunder  — creates conditional escrow with crypto-conditions
- *
- * Telegraf handles XRPL commands, Gemini handles general conversation.
- */
+// packages/agents/src/index.ts
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,357 +7,548 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 import { Telegraf } from 'telegraf';
+import { message } from 'telegraf/filters';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-import { initBridge, emitEvent } from './bridge/websocket.js';
-import { getExplorerUrl, getWallet } from './services/xrplClient.js';
-import { createEscrow, finishEscrow, generateConditionPair } from './services/escrow.js';
-import { searchVentures, findVenture, VENTURES } from './data/ventures.js';
-import { calculateTrustScore, formatScoreReport } from './services/trustScore.js';
-import { initVentureWallets } from './services/treasury.js';
+import { initDB } from './db/database.js';
+import { initBridgeServer, emitEvent } from './bridge/server.js';
+import { initAllMCP, mcpCreateDID, isMCPConnected } from './services/mcpClient.js';
 import { startA2AServer } from './a2a/agentCards.js';
-import { startX402Server, storeVerificationResult } from './services/x402.js';
-import {
-  connectMCP, isMCPConnected, mcpListTools,
-  mcpSetOracle, mcpCreateCredential, mcpCreateDID,
-} from './services/mcpClient.js';
-import type { PendingVerification, ActiveEscrow } from './data/types.js';
 
-// ── State ────────────────────────────────────────────────────────────
+import { getFacilitatorSystemPrompt, parseCampaignFromGemini, handleCampaignCreate, handleSubmitEvidence, handleMyStatus } from './bees/facilitator.js';
+import { evaluateCampaign } from './bees/evaluator.js';
+import { allocateAndCreateEscrows, releaseMilestoneEscrow, cancelCampaignEscrows, getPoolStatus, ensureRLUSDTrustlines } from './bees/treasury.js';
+import { reviewEvidence, approveMilestone, rejectMilestone, verifyEvidenceWithLLM } from './bees/verifier.js';
+import { completeCampaign } from './bees/reviewer.js';
+import { getCampaignsByNgo, getCampaignsByStatus, getMilestones, getMilestone, updateMilestone } from './db/database.js';
+import type { Campaign, Milestone, BeeName } from './data/types.js';
 
-const pendingVerifications = new Map<string, PendingVerification>();
-const activeEscrows = new Map<string, ActiveEscrow>();
+// ── LLM (Groq primary, Gemini fallback) ─────────────────────────────
 
-// ── Gemini ───────────────────────────────────────────────────────────
+const GROQ_KEYS = (process.env.GROQ_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+let groqKeyIndex = 0;
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
-
-async function askGemini(systemPrompt: string, userMessage: string): Promise<string> {
-  try {
-    const result = await model.generateContent([
-      { role: 'user', parts: [{ text: `${systemPrompt}\n\nUser message: ${userMessage}` }] },
-    ]);
-    return result.response.text();
-  } catch (err) {
-    console.error('[GEMINI] Error:', err);
-    return 'Sorry, something went wrong. Try "Find ventures" or "Verify Solar Sister".';
-  }
-}
-
-// ── Agent Handlers ───────────────────────────────────────────────────
-
-async function handleScout(query: string): Promise<string> {
-  emitEvent({ agent: 'scout', type: 'work', message: `Searching: "${query}"` });
-
-  const results = searchVentures(query);
-  const ventures = results.length > 0 ? results : VENTURES.slice(0, 5);
-
-  const list = ventures.map((v, i) =>
-    `${i + 1}. **${v.name}**\n   📍 ${v.countries} | 🏷️ ${v.sector} | ${v.type}\n   ${v.description.slice(0, 120)}...`
-  ).join('\n\n');
-
-  emitEvent({ agent: 'scout', type: 'complete', message: `Found ${ventures.length} ventures` });
-
-  return `🔍 Found ${ventures.length} venture(s):\n\n${list}\n\n💡 Say "Verify [name]" to check trust score\n💰 Say "Fund [name] with [amount] XRP" to create escrow`;
-}
-
-async function handleAnalyst(text: string): Promise<string> {
-  const venture = findVenture(text);
-  if (!venture) return '❌ Venture not found. Try "Find ventures" first.';
-
-  emitEvent({ agent: 'analyst', type: 'work', message: `Verifying ${venture.name}...` });
-
-  // Calculate deterministic trust score
-  const score = calculateTrustScore(venture);
-  venture.trustScore = score;
-
-  let oracleTxHash = '';
-  let credentialTxHash = '';
-
-  // Publish on-chain via MCP if connected
-  if (isMCPConnected()) {
+async function askGroq(systemPrompt: string, userMessage: string): Promise<string | null> {
+  if (GROQ_KEYS.length === 0) return null;
+  for (let attempt = 0; attempt < GROQ_KEYS.length; attempt++) {
+    const key = GROQ_KEYS[groqKeyIndex % GROQ_KEYS.length];
     try {
-      emitEvent({ agent: 'analyst', type: 'work', message: `Publishing oracle for ${venture.name}...` });
-      const oracleResult = await mcpSetOracle(
-        0, 'BumbleBee', 'TrustScore',
-        Math.floor(Date.now() / 1000),
-        [{ BaseAsset: 'XRP', QuoteAsset: 'USD', AssetPrice: score.total, Scale: 0 }],
-      );
-      oracleTxHash = oracleResult?.hash || oracleResult?.tx_hash || '';
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          max_tokens: 500,
+          temperature: 0.7,
+        }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const data = await res.json() as any;
+      return data.choices?.[0]?.message?.content || null;
     } catch (err: any) {
-      console.log(`  ⚠️ Oracle publish failed: ${err.message?.slice(0, 50)}`);
-    }
-
-    try {
-      const credResult = await mcpCreateCredential(
-        venture.walletAddress || '',
-        'TrustVerified',
-        `score:${score.total}|venture:${venture.name}`,
-      );
-      credentialTxHash = credResult?.hash || credResult?.tx_hash || '';
-    } catch (err: any) {
-      console.log(`  ⚠️ Credential issue failed: ${err.message?.slice(0, 50)}`);
+      console.log(`[GROQ] Key ${groqKeyIndex + 1} failed:`, err.message?.slice(0, 60));
+      groqKeyIndex = (groqKeyIndex + 1) % GROQ_KEYS.length;
     }
   }
-
-  // Generate escrow condition pair
-  const { condition, fulfillment } = generateConditionPair();
-
-  pendingVerifications.set(venture.id, {
-    ventureId: venture.id,
-    condition,
-    fulfillment,
-    trustScore: score.total,
-    oracleTxHash,
-    credentialTxHash,
-  });
-
-  // Store for x402 API
-  storeVerificationResult(venture.id, {
-    ventureName: venture.name,
-    trustScore: score.total,
-    verifiedAt: new Date().toISOString(),
-    metrics: score,
-  });
-
-  emitEvent({
-    agent: 'analyst', type: 'complete',
-    message: `Verified ${venture.name}: Score ${score.total}/100`,
-    data: { txHash: oracleTxHash, trustScore: score.total },
-  });
-
-  const report = formatScoreReport(venture, score);
-  const mcpSection = isMCPConnected()
-    ? `\n🔌 **On-chain (via MCP):**\n• Oracle: ${oracleTxHash || 'pending approval'}\n• Credential: ${credentialTxHash || 'pending approval'}\n• Escrow condition: Generated ✅`
-    : '\n🔌 MCP not connected — scores calculated locally';
-
-  return `🔬 **Verification Report: ${venture.name}**\n\n${report}\n${mcpSection}\n\n✅ **VERIFIED** — Ready for funding!\nSay: "Fund ${venture.name} with 50 XRP"`;
+  return null;
 }
 
-async function handleFunder(text: string): Promise<string> {
-  const amountMatch = text.match(/(\d+)\s*XRP/i);
-  const amount = amountMatch ? parseInt(amountMatch[1]) : 50;
-  const amountDrops = (amount * 1_000_000).toString();
-  const venture = findVenture(text);
-  if (!venture) return '❌ Venture not found. Try "Find ventures" first.';
-  if (!venture.walletAddress) return `❌ ${venture.name} wallet not provisioned yet. Restart the bot to initialize wallets.`;
+const GEMINI_KEYS = (process.env.GOOGLE_API_KEYS || process.env.GOOGLE_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+let currentKeyIndex = 0;
 
-  emitEvent({ agent: 'funder', type: 'work', message: `Creating escrow: ${amount} XRP for ${venture.name}` });
+// Track conversation state per user
+interface UserState {
+  mode: string;
+  campaignId?: string;
+  context?: string;
+  step?: number;
+  draft?: Record<string, any>;
+}
+const userState = new Map<string, UserState>();
 
-  const verification = pendingVerifications.get(venture.id);
-  let condition: string, fulfillment: string;
-  if (verification) {
-    condition = verification.condition;
-    fulfillment = verification.fulfillment;
-  } else {
-    const pair = generateConditionPair();
-    condition = pair.condition;
-    fulfillment = pair.fulfillment;
+// Campaign intake prompt — one message, Gemini or manual parse
+const CAMPAIGN_PROMPT = `Tell me about your campaign in one message. Include:\n- Organization name\n- Campaign title\n- What it does\n- Sector (Education, Healthcare, WASH, Agriculture, Energy, Environment)\n- Country\n- Amount needed in XRP`;
+
+async function askLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
+  // Try Groq first (fast, reliable free tier)
+  const groqResponse = await askGroq(systemPrompt, userMessage);
+  if (groqResponse) return groqResponse;
+
+  // Fallback to Gemini with key rotation
+  for (let attempt = 0; attempt < Math.max(GEMINI_KEYS.length, 1); attempt++) {
+    try {
+      const key = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
+      if (!key) break;
+      const ai = new GoogleGenerativeAI(key);
+      const model = ai.getGenerativeModel({ model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash' });
+      const result = await model.generateContent(`${systemPrompt}\n\nUser: ${userMessage}`);
+      return result.response.text();
+    } catch (err: any) {
+      console.log(`[GEMINI] Key ${currentKeyIndex + 1} failed:`, err.message?.slice(0, 60));
+      currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
+    }
   }
-
-  try {
-    const result = await createEscrow(
-      process.env.FUNDER_WALLET_SEED!,
-      venture.walletAddress,
-      amountDrops,
-      condition,
-    );
-
-    const funderWallet = getWallet(process.env.FUNDER_WALLET_SEED!);
-    activeEscrows.set(venture.id, {
-      ventureId: venture.id,
-      ventureName: venture.name,
-      txHash: result.txHash,
-      sequence: result.sequence,
-      ownerAddress: funderWallet.address,
-      condition,
-      fulfillment,
-      amount: amount.toString(),
-      createdAt: new Date().toISOString(),
-    });
-
-    const explorerLink = getExplorerUrl(result.txHash);
-    emitEvent({
-      agent: 'funder', type: 'complete',
-      message: `Escrow created: ${amount} XRP for ${venture.name}`,
-      data: { txHash: result.txHash, amount, ventureName: venture.name },
-    });
-
-    return `💰 **Escrow Created!**\n\n🔒 Amount: ${amount} XRP locked\n📍 Destination: ${venture.name}\n⏰ Auto-refund: 24 hours\n🔐 Crypto-condition attached\n\n🔗 ${explorerLink}\n\n✅ Say "Release escrow for ${venture.name}" after verification.`;
-  } catch (err: any) {
-    emitEvent({ agent: 'funder', type: 'error', message: `Escrow failed: ${err.message}` });
-    return `❌ Escrow creation failed: ${err.message}`;
-  }
-}
-
-async function handleRelease(text: string): Promise<string> {
-  const venture = findVenture(text);
-  if (!venture) return '❌ Venture not found.';
-
-  const escrow = activeEscrows.get(venture.id);
-  if (!escrow) return `❌ No active escrow for ${venture.name}.`;
-
-  emitEvent({ agent: 'funder', type: 'work', message: `Releasing escrow for ${venture.name}` });
-
-  try {
-    const result = await finishEscrow(
-      process.env.ANALYST_WALLET_SEED!,
-      escrow.ownerAddress,
-      escrow.sequence,
-      escrow.condition,
-      escrow.fulfillment,
-    );
-
-    activeEscrows.delete(venture.id);
-    const explorerLink = getExplorerUrl(result.txHash);
-
-    emitEvent({
-      agent: 'funder', type: 'complete',
-      message: `Released ${escrow.amount} XRP to ${venture.name}`,
-      data: { txHash: result.txHash, amount: escrow.amount, ventureName: venture.name },
-    });
-
-    return `✅ **Escrow Released!**\n\n💸 ${escrow.amount} XRP sent to ${venture.name}\n🔓 Verified by BeeAnalyst\n\n🔗 ${explorerLink}`;
-  } catch (err: any) {
-    return `❌ Release failed: ${err.message}`;
-  }
-}
-
-// ── Intent Router ───────────────────────────────────────────────────
-
-function isXrplCommand(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('release') || lower.includes('finish') ||
-    ((lower.includes('fund') || lower.includes('escrow') || lower.includes('donate')) && lower.includes('xrp')) ||
-    lower.includes('verify') || lower.includes('check') || lower.includes('analyze') ||
-    lower.includes('find') || lower.includes('search') || lower.includes('venture') ||
-    lower.includes('agriculture') || lower.includes('healthcare') || lower.includes('education') ||
-    lower.includes('energy') || lower.includes('wash') || lower === '/start'
-  );
-}
-
-async function routeCommand(text: string): Promise<string | null> {
-  const lower = text.toLowerCase();
-
-  if (lower.includes('release') || lower.includes('finish')) return handleRelease(text);
-  if ((lower.includes('fund') || lower.includes('escrow') || lower.includes('donate')) && lower.includes('xrp')) return handleFunder(text);
-  if (lower.includes('verify') || lower.includes('check') || lower.includes('analyze')) return handleAnalyst(text);
-  if (lower.includes('find') || lower.includes('search') || lower.includes('venture') ||
-      lower.includes('agriculture') || lower.includes('healthcare') || lower.includes('education') ||
-      lower.includes('energy') || lower.includes('wash')) return handleScout(lower);
-
   return null;
 }
 
 // ── Main ────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('\n🐝 BumbleBee — Autonomous Social Impact Funding on XRPL\n');
+  console.log('\n BumbleBee v2 — Campaign-Based Milestone Funding\n');
 
-  // 1. Infrastructure
-  initBridge();
+  // 1. Database
+  initDB();
+  console.log('   DB: SQLite initialized');
+
+  // 2. Infrastructure
+  initBridgeServer();
   startA2AServer();
-  startX402Server(3003);
 
-  // 2. Connect MCP (mcp-xrpl server for on-chain operations)
-  const mcpReady = await connectMCP();
+  // 3. MCP (multi-wallet)
+  const mcpReady = await initAllMCP();
 
-  // 3. Register agent DIDs via MCP
+  // 4. Register DIDs
   if (mcpReady) {
-    for (const agent of ['BeeScout', 'BeeAnalyst', 'BeeFunder']) {
-      try {
-        await mcpCreateDID(`did:xrpl:testnet:${agent.toLowerCase()}`);
-        console.log(`   🆔 ${agent} DID registered`);
-      } catch (err: any) {
-        console.log(`   ⚠️ ${agent} DID: ${err.message?.slice(0, 40)}`);
+    const bees: BeeName[] = ['evaluator', 'treasury', 'facilitator', 'verifier', 'reviewer'];
+    for (const bee of bees) {
+      if (isMCPConnected(bee)) {
+        try {
+          await mcpCreateDID(bee, `did:xrpl:testnet:${bee}`);
+          console.log(`   DID: ${bee} registered`);
+        } catch (err: any) {
+          console.log(`   DID: ${bee} - ${err.message?.slice(0, 40)}`);
+        }
       }
     }
   }
 
-  // 4. Initialize venture wallets from treasury
-  if (process.env.TREASURY_WALLET_SEED) {
-    const wss = process.env.XRPL_WSS || 'wss://s.altnet.rippletest.net:51233';
-    await initVentureWallets(VENTURES, process.env.TREASURY_WALLET_SEED, wss, 10);
-  } else {
-    console.log('   ⚠️ No TREASURY_WALLET_SEED — venture wallets not provisioned');
+  // 4b. RLUSD TrustLines (if configured)
+  if (process.env.RLUSD_ISSUER) {
+    ensureRLUSDTrustlines().then(ok => {
+      console.log(`   RLUSD: ${ok ? 'Trustlines ready' : 'Not configured'}`);
+    }).catch(() => {
+      console.log('   RLUSD: Setup skipped (issuer not available)');
+    });
   }
 
   // 5. Telegram bot
   const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
 
+  // ── Commands ───────────────────────────────────────────
+
   bot.command('start', (ctx) => {
-    ctx.reply(`🐝 **Welcome to BumbleBee!**
-
-Autonomous agents for social impact funding on XRPL.
-
-🤖 Three agents: BeeScout, BeeAnalyst, BeeFunder
-⛓️ XRPL: Escrow, Oracle, Credentials, DID
-🔌 MCP: ${mcpReady ? 'Connected' : 'Not available'}
-💳 x402: http://localhost:3003/pricing
-
-Try:
-• "Find agriculture ventures"
-• "Verify Solar Sister"
-• "Fund Solar Sister with 50 XRP"
-• "Release escrow for Solar Sister"`, { parse_mode: 'Markdown' });
+    ctx.reply(
+      `BumbleBee — Impact Funding on XRPL\n\n` +
+      `5 Bees manage your campaign from submission to completion.\n\n` +
+      `NGO commands:\n` +
+      `  /campaign — submit a funding request\n` +
+      `  /submit <num> — send evidence for a milestone\n` +
+      `  /mystatus — check your campaigns\n\n` +
+      `Admin:\n` +
+      `  /pool — treasury balance\n\n` +
+      `Or just chat naturally.`
+    );
   });
 
-  bot.command('tools', async (ctx) => {
-    if (isMCPConnected()) {
-      const tools = await mcpListTools();
-      ctx.reply(`🔌 **MCP Tools (mcp-xrpl)**\n\n${tools.length} XRPL tools available:\n${tools.slice(0, 20).map(t => `• ${t}`).join('\n')}${tools.length > 20 ? `\n... and ${tools.length - 20} more` : ''}`, { parse_mode: 'Markdown' }).catch(() => {
-        ctx.reply(`MCP Tools: ${tools.join(', ')}`);
-      });
+  bot.command('help', (ctx) => {
+    ctx.reply(
+      `/campaign — start a new campaign\n` +
+      `/submit 1 — submit evidence for milestone 1 (attach files)\n` +
+      `/mystatus — view your campaigns\n` +
+      `/pool — treasury status\n\n` +
+      `You can also just describe your project and I'll guide you.`
+    );
+  });
+
+  bot.command('campaign', (ctx) => {
+    const userId = ctx.from.id.toString();
+    userState.set(userId, { mode: 'campaign_intake' });
+    ctx.reply(CAMPAIGN_PROMPT);
+  });
+
+  bot.command('mystatus', (ctx) => {
+    const userId = ctx.from.id.toString();
+    const status = handleMyStatus(userId);
+    ctx.reply(status);
+  });
+
+  bot.command('pool', async (ctx) => {
+    const status = await getPoolStatus();
+    ctx.reply(status);
+  });
+
+  bot.command('submit', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const args = ctx.message.text.split(' ');
+    const milestoneNum = parseInt(args[1]);
+
+    if (!milestoneNum || milestoneNum < 1 || milestoneNum > 3) {
+      ctx.reply('Usage: /submit <milestone_number>\nExample: /submit 2\n\nThen attach photos or documents in the next message.');
+      return;
+    }
+
+    // Find the user's active campaign
+    const campaigns = getCampaignsByNgo(userId) as Campaign[];
+    const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+
+    if (!activeCampaign) {
+      ctx.reply('No active campaign found. Submit a campaign first with /campaign');
+      return;
+    }
+
+    // Check milestone status before setting state
+    const milestone = getMilestone(activeCampaign.id, milestoneNum) as Milestone | undefined;
+    if (!milestone) {
+      ctx.reply(`Milestone ${milestoneNum} not found.`);
+      return;
+    }
+    if (milestone.status === 'completed') {
+      ctx.reply(`Milestone ${milestoneNum} ("${milestone.title}") is already completed.`);
+      return;
+    }
+    if (milestone.status === 'pending') {
+      ctx.reply(`Milestone ${milestoneNum} ("${milestone.title}") isn't active yet. Complete the earlier milestones first.`);
+      return;
+    }
+
+    userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: milestoneNum.toString() });
+    ctx.reply(`Send your evidence for milestone ${milestoneNum} ("${milestone.title}") now.\nAttach photos, invoices, or documents.`);
+  });
+
+  // ── File/Photo handler ─────────────────────────────────
+
+  bot.on(message('photo'), async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const state = userState.get(userId);
+
+    if (state?.mode === 'awaiting_evidence' && state.campaignId && state.context) {
+      const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+      const milestoneNum = parseInt(state.context);
+
+      const result = handleSubmitEvidence(state.campaignId, milestoneNum, [fileId]);
+      ctx.reply(result.message);
+
+      if (result.milestone) {
+        // Trigger VerifierBee LLM review
+        const review = reviewEvidence(state.campaignId, milestoneNum);
+        if (review.hasEvidence && review.campaign && review.milestone) {
+          const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+          ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
+
+          if (verdict.approved) {
+            const approveResult = approveMilestone(state.campaignId, milestoneNum);
+
+            if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(releaseMsg);
+              const completionMsg = await completeCampaign(state.campaignId);
+              ctx.reply(completionMsg);
+            } else {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            }
+          } else {
+            const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
+            ctx.reply(`[VerifierBee] ${rejectResult}`);
+          }
+        }
+      }
+
+      userState.delete(userId);
     } else {
-      ctx.reply('🔌 MCP not connected. Using direct xrpl.js.');
+      // Auto-detect /submit N in caption or find active milestone
+      const caption = (ctx.message as any).caption || '';
+      const captionMatch = caption.match(/\/submit\s+(\d)/);
+      const campaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+
+      if (activeCampaign) {
+        let milestoneNum: number | null = null;
+        if (captionMatch) {
+          milestoneNum = parseInt(captionMatch[1]);
+        } else {
+          // Auto-detect: find the active or revision_needed milestone
+          const milestones = getMilestones(activeCampaign.id) as Milestone[];
+          const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
+          if (active) milestoneNum = active.number;
+        }
+
+        if (milestoneNum) {
+          const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+          userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: milestoneNum.toString() });
+          // Re-trigger by emitting to self — simpler: just inline the evidence flow
+          const result = handleSubmitEvidence(activeCampaign.id, milestoneNum, [fileId]);
+          ctx.reply(result.message);
+          if (result.milestone) {
+            const review = reviewEvidence(activeCampaign.id, milestoneNum);
+            if (review.hasEvidence && review.campaign && review.milestone) {
+              const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+              ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
+              if (verdict.approved) {
+                const approveResult = approveMilestone(activeCampaign.id, milestoneNum);
+                if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
+                  ctx.reply(releaseMsg);
+                  const completionMsg = await completeCampaign(activeCampaign.id);
+                  ctx.reply(completionMsg);
+                } else {
+                  const releaseMsg = await releaseMilestoneEscrow(activeCampaign.id, milestoneNum);
+                  ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+                }
+              } else {
+                const rejectResult = rejectMilestone(activeCampaign.id, milestoneNum, verdict.feedback);
+                ctx.reply(`[VerifierBee] ${rejectResult}`);
+              }
+            }
+          }
+          userState.delete(userId);
+          return;
+        }
+      }
+      ctx.reply('Got a photo. To submit evidence, use /submit <milestone_number> first, then attach files.');
     }
   });
 
-  bot.on('text', async (ctx) => {
+  bot.on(message('document'), async (ctx) => {
+    const userId = ctx.from.id.toString();
+    let state = userState.get(userId);
+
+    // Auto-detect /submit N in document caption
+    if (!state?.mode && ctx.message.caption) {
+      const captionMatch = ctx.message.caption.match(/\/submit\s+(\d)/);
+      if (captionMatch) {
+        const campaigns = getCampaignsByNgo(userId) as Campaign[];
+        const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+        if (activeCampaign) {
+          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: captionMatch[1] };
+          userState.set(userId, state);
+        }
+      }
+    }
+
+    // If still no state, auto-detect active milestone
+    if (!state?.mode) {
+      const campaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = campaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+      if (activeCampaign) {
+        const milestones = getMilestones(activeCampaign.id) as Milestone[];
+        const active = milestones.find(m => m.status === 'active' || m.status === 'revision_needed');
+        if (active) {
+          state = { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: active.number.toString() };
+          userState.set(userId, state);
+        }
+      }
+    }
+
+    if (state?.mode === 'awaiting_evidence' && state.campaignId && state.context) {
+      const fileId = ctx.message.document.file_id;
+      const milestoneNum = parseInt(state.context);
+
+      const result = handleSubmitEvidence(state.campaignId, milestoneNum, [fileId]);
+      ctx.reply(result.message);
+
+      if (result.milestone) {
+        const review = reviewEvidence(state.campaignId, milestoneNum);
+        if (review.hasEvidence && review.campaign && review.milestone) {
+          const verdict = await verifyEvidenceWithLLM(review.campaign, review.milestone, review.fileCount, askLLM);
+          ctx.reply(`[VerifierBee] Evidence analysis (${verdict.confidence}% confidence):\n${verdict.reasoning}`);
+
+          if (verdict.approved) {
+            const approveResult = approveMilestone(state.campaignId, milestoneNum);
+
+            if (approveResult === 'MILESTONE_APPROVED:ALL_COMPLETE') {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(releaseMsg);
+              const completionMsg = await completeCampaign(state.campaignId);
+              ctx.reply(completionMsg);
+            } else {
+              const releaseMsg = await releaseMilestoneEscrow(state.campaignId, milestoneNum);
+              ctx.reply(`[VerifierBee] Milestone ${milestoneNum} approved.\n\n${releaseMsg}`);
+            }
+          } else {
+            const rejectResult = rejectMilestone(state.campaignId, milestoneNum, verdict.feedback);
+            ctx.reply(`[VerifierBee] ${rejectResult}`);
+          }
+        }
+      }
+
+      userState.delete(userId);
+    } else {
+      ctx.reply('Got a document. To submit evidence, use /submit <milestone_number> first.');
+    }
+  });
+
+  // ── Text handler ──────
+
+  bot.on(message('text'), async (ctx) => {
+    const userId = ctx.from.id.toString();
     const text = ctx.message.text;
-    console.log(`\n[TELEGRAM] "${text}"`);
+    const state = userState.get(userId);
+    const lower = text.toLowerCase();
+
+    console.log(`[MSG] ${userId}: "${text.slice(0, 80)}"`);
 
     try {
-      const xrplResponse = await routeCommand(text);
-      if (xrplResponse) {
-        const chunks = xrplResponse.match(/[\s\S]{1,4000}/g) || [xrplResponse];
-        for (const chunk of chunks) {
-          await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+      // Campaign intake mode
+      if (state?.mode === 'campaign_intake') {
+        // Cancel words
+        if (['no', 'cancel', 'stop', 'exit', 'back', 'nevermind'].includes(lower.trim())) {
+          userState.delete(userId);
+          ctx.reply('Cancelled. Let me know when you want to start.');
+          return;
+        }
+
+        // Need minimum info — check if message has enough substance
+        if (text.trim().length < 20) {
+          ctx.reply('Need more detail. Describe your org, what the campaign does, sector, country, and amount in XRP — all in one message.');
+          return;
+        }
+
+        // Try LLM extraction
+        const llmResponse = await askLLM(getFacilitatorSystemPrompt(), text);
+        let campaignData = llmResponse ? parseCampaignFromGemini(llmResponse) : null;
+
+        // Fallback: line-by-line extraction
+        if (!campaignData) {
+          const lines = text.split('\n').map(l => l.replace(/^[-•*]\s*/, '').trim()).filter(Boolean);
+          const sectors = ['Education', 'Healthcare', 'WASH', 'Agriculture', 'Energy', 'Environment'];
+          const foundSector = sectors.find(s => lower.includes(s.toLowerCase())) || 'Education';
+          const amountMatch = text.match(/(\d+)\s*XRP/i);
+          const amount = amountMatch ? parseFloat(amountMatch[1]) : 3;
+
+          // Try to extract from labeled lines (e.g. "Org name is X" or "Organization name: X")
+          const extract = (keys: string[]): string => {
+            for (const line of lines) {
+              const ll = line.toLowerCase();
+              if (keys.some(k => ll.includes(k))) {
+                return line.replace(/^.*?(?:is|:)\s*/i, '').trim() || line;
+              }
+            }
+            return '';
+          };
+
+          const orgName = extract(['org', 'organization']) || lines[0] || 'NGO';
+          const title = extract(['campaign', 'title', 'name']) || lines[1] || text.slice(0, 60);
+          const country = extract(['country', 'region', 'location']) || 'Global';
+
+          campaignData = {
+            ngo_name: orgName.slice(0, 60),
+            title: title.slice(0, 60),
+            description: text,
+            sector: foundSector,
+            country,
+            funding_goal: Math.min(amount, 10),
+          };
+        }
+
+        const result = handleCampaignCreate(campaignData, userId);
+        userState.delete(userId);
+
+        const evalResult = await evaluateCampaign(result.campaignId, askLLM);
+        ctx.reply(result.message);
+
+        if (evalResult.approved) {
+          ctx.reply(evalResult.message);
+          const fundResult = await allocateAndCreateEscrows(result.campaignId);
+          ctx.reply(fundResult);
+        } else {
+          ctx.reply(evalResult.message);
         }
         return;
       }
 
-      // General chat via Gemini
-      const systemPrompt = `You are BeeScout, part of the BumbleBee protocol on XRPL. You help users discover and fund social impact ventures using blockchain escrow. You're enthusiastic about impact but data-driven. Keep responses concise for Telegram. Guide users to commands: "Find ventures", "Verify [name]", "Fund [name] with [amount] XRP".`;
-      const response = await askGemini(systemPrompt, text);
-      const chunks = response.match(/[\s\S]{1,4000}/g) || [response];
-      for (const chunk of chunks) {
-        await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+      // Check if user has an active campaign — route "done/okay/finished/next" to evidence
+      const userCampaigns = getCampaignsByNgo(userId) as Campaign[];
+      const activeCampaign = userCampaigns.find(c => ['funded', 'in_progress'].includes(c.status));
+
+      if (activeCampaign && (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('next') || lower.includes('okay') || lower.includes('ok') || lower.includes('submit') || lower.includes('evidence') || lower.match(/^m\d/))) {
+        const milestones = getMilestones(activeCampaign.id) as Milestone[];
+        const activeMilestone = milestones.find(m => m.status === 'active');
+        if (activeMilestone) {
+          userState.set(userId, { mode: 'awaiting_evidence', campaignId: activeCampaign.id, context: activeMilestone.number.toString() });
+          ctx.reply(`[FacilitatorBee] Ready for milestone ${activeMilestone.number}: "${activeMilestone.title}"\n\nAttach a photo or document as evidence.`);
+        } else {
+          const allDone = milestones.every(m => m.status === 'completed');
+          ctx.reply(allDone ? 'All milestones completed. Campaign is done.' : 'No active milestone right now. Use /mystatus to check.');
+        }
+        return;
       }
+
+      // Intent: start a campaign
+      if (lower.includes('campaign') || lower.includes('grant') || lower.includes('funding') || lower.includes('ngo')) {
+        userState.set(userId, { mode: 'campaign_intake' });
+        ctx.reply(CAMPAIGN_PROMPT);
+        return;
+      }
+
+      // General chat — try Gemini, smart fallback if unavailable
+      const companionPrompt = `You are BumbleBee, an impact funding assistant on XRPL. Be direct, short, no emojis. If someone describes a project, suggest /campaign. Status check: /mystatus. Treasury: /pool.`;
+      const response = await askLLM(companionPrompt, text);
+      if (response) {
+        ctx.reply(response);
+      } else if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello') || lower.includes('sup') || lower.includes('yo')) {
+        ctx.reply('Hey. Ready when you are.\n\n/campaign — submit a funding request\n/mystatus — check progress\n/pool — treasury balance');
+      } else if (lower.includes('help') || lower.includes('what') || lower.includes('how')) {
+        ctx.reply('I manage impact funding on XRPL. NGOs submit campaigns, I evaluate them, set milestones, and release funds as you deliver.\n\nStart with /campaign');
+      } else {
+        ctx.reply('Not sure what you mean. Try /campaign to get started or /help for options.');
+      }
+
     } catch (err: any) {
-      console.error('[TELEGRAM] Error:', err.message);
-      await ctx.reply('❌ Something went wrong. Try "Find ventures" or "Verify Solar Sister".');
+      console.error('[BOT]', err.message);
+      ctx.reply('Something went wrong. Try /help');
     }
   });
 
   bot.launch().then(() => {
-    console.log('📱 Telegram polling started');
+    console.log('   Telegram: polling started');
   }).catch((err) => {
-    console.error('📱 Telegram error:', err.message);
+    console.error('   Telegram error:', err.message);
   });
 
-  // 6. Emit spawn events
-  emitEvent({ agent: 'scout', type: 'spawn', message: 'BeeScout ready' });
-  emitEvent({ agent: 'analyst', type: 'spawn', message: 'BeeAnalyst ready' });
-  emitEvent({ agent: 'funder', type: 'spawn', message: 'BeeFunder ready' });
+  // 6. Spawn events
+  const beeNames: BeeName[] = ['evaluator', 'treasury', 'facilitator', 'verifier', 'reviewer'];
+  for (const bee of beeNames) {
+    emitEvent({ agent: bee, type: 'spawn', message: `${bee} ready`, timestamp: Date.now() });
+  }
 
-  console.log(`\n🐝 BumbleBee is live!`);
-  console.log(`   🔌 MCP: ${mcpReady ? 'Connected' : 'Not available'}`);
-  console.log(`   🌐 A2A: http://localhost:3002/.well-known/agent.json`);
-  console.log(`   💳 x402: http://localhost:3003/pricing`);
-  console.log(`   📊 Dashboard: http://localhost:3000\n`);
+  console.log(`\n BumbleBee is live!`);
+  console.log(`   MCP: ${mcpReady ? 'Connected' : 'Not available (using direct xrpl.js)'}`);
+  console.log(`   RLUSD: ${process.env.RLUSD_ISSUER ? 'Enabled (dual-currency)' : 'XRP only'}`);
+  console.log(`   A2A: http://localhost:3002/.well-known/agent.json\n`);
+
+  // 7. Milestone deadline checker (runs every hour)
+  setInterval(async () => {
+    try {
+      const fundedCampaigns = (getCampaignsByStatus('funded') as Campaign[]).concat(getCampaignsByStatus('in_progress') as Campaign[]);
+      for (const campaign of fundedCampaigns) {
+        const milestones = getMilestones(campaign.id) as Milestone[];
+        const activeMilestone = milestones.find(m => m.status === 'active');
+        if (!activeMilestone || !campaign.funded_at) continue;
+
+        const daysSinceFunded = (Date.now() - new Date(campaign.funded_at).getTime()) / (1000 * 60 * 60 * 24);
+
+        // Reminder at day 5
+        if (daysSinceFunded >= 5 && daysSinceFunded < 7) {
+          console.log(`[DEADLINE] Reminder: ${campaign.title} M${activeMilestone.number} due in ${(7 - daysSinceFunded).toFixed(1)} days`);
+        }
+
+        // Expire at day 7
+        if (daysSinceFunded >= 7) {
+          console.log(`[DEADLINE] Expired: ${campaign.title} M${activeMilestone.number}`);
+          updateMilestone(activeMilestone.id, { status: 'expired' });
+          const cancelMsg = await cancelCampaignEscrows(campaign.id);
+          console.log(`[DEADLINE] ${cancelMsg}`);
+        }
+      }
+    } catch (err: any) {
+      console.error('[DEADLINE]', err.message);
+    }
+  }, 60 * 60 * 1000); // Every hour
 
   process.once('SIGINT', () => { bot.stop('SIGINT'); process.exit(0); });
   process.once('SIGTERM', () => { bot.stop('SIGTERM'); process.exit(0); });

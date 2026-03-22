@@ -34,7 +34,7 @@ const THEMES = {
 export function WalletConnector() {
   const { walletManager } = useWallet();
   const walletConnectorRef = useWalletConnector(walletManager);
-  const [currentTheme] = useState("dark");
+  const [currentTheme] = useState("light");
   const [isClient, setIsClient] = useState(false);
 
   useEffect(() => {
